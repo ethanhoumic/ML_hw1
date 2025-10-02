@@ -356,8 +356,8 @@ if __name__ == '__main__':
 
     # 建立 DataFrame
     df_out = pd.DataFrame({
-        'id': files,
-        'label': le.inverse_transform(preds)
+        'id': [os.path.splitext(os.path.basename(f))[0] for f in files],  # 只保留檔名，去掉 .txt
+        'label': [l.replace("D", "") for l in le.inverse_transform(preds)]  # 去掉 D
     })
 
     # 存成 CSV
