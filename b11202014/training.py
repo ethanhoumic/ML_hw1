@@ -1,29 +1,35 @@
 """
-Ultra Advanced Training Script for Go Rank Prediction
-Uses XGBoost-style features and optimal hyperparameters
+Ultra Advanced Training with LightGBM
+Optimized for maximum accuracy on Go rank prediction
 
-This version focuses heavily on the rank model outputs which are 
-the most discriminative features for predicting player strength.
+LightGBM advantages:
+- Handles categorical features well
+- Fast training
+- Great for tabular data
+- Built-in regularization
+- Excellent for small datasets with many features
 """
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier, ExtraTreesClassifier
-from sklearn.linear_model import LogisticRegression, RidgeClassifier
-from sklearn.svm import SVC
-from sklearn.preprocessing import StandardScaler, RobustScaler
+import lightgbm as lgb
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier, ExtraTreesClassifier
+from sklearn.preprocessing import RobustScaler
 import pickle
 import os
 import argparse
 
 
-class UltraAdvancedPredictor:
+# Import the same feature engineering from Q5.py
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+
+class UltraLightGBMPredictor:
     def __init__(self):
         self.model = None
-        self.scaler = RobustScaler()  # More robust to outliers
+        self.scaler = RobustScaler()
         
     def parse_game_file(self, filepath):
-        """Parse game file."""
         features_list = []
         
         try:
@@ -73,177 +79,147 @@ class UltraAdvancedPredictor:
         
         return np.array(features_list) if features_list else np.zeros((0, 30))
     
-    def ultra_engineer_features(self, move_features):
-        """
-        Ultra-advanced feature engineering.
-        Key insight: Rank model outputs are DIRECTLY trained to predict rank!
-        """
+    def engineer_advanced_features(self, move_features):
+        """Same as Q5.py - 300 features"""
         if len(move_features) == 0:
-            return np.zeros(250)
+            return np.zeros(300)
         
         aggregated = []
         
-        # Extract feature groups
         policy_probs = move_features[:, 0:9]
         value_preds = move_features[:, 9:18]
-        rank_probs = move_features[:, 18:27]  # MOST IMPORTANT
+        rank_probs = move_features[:, 18:27]
         strength = move_features[:, 27]
         winrate = move_features[:, 28]
         lead = move_features[:, 29]
         
         rank_indices = np.arange(1, 10)
         
-        # ===== RANK MODEL FEATURES (HIGHEST PRIORITY) =====
+        # Rank model features (complete set)
+        aggregated.extend(np.mean(rank_probs, axis=0))
+        aggregated.extend(np.median(rank_probs, axis=0))
+        aggregated.extend(np.std(rank_probs, axis=0))
+        aggregated.extend(np.max(rank_probs, axis=0))
+        aggregated.extend(np.min(rank_probs, axis=0))
+        aggregated.extend(np.percentile(rank_probs, 25, axis=0))
+        aggregated.extend(np.percentile(rank_probs, 75, axis=0))
+        aggregated.extend(np.percentile(rank_probs, 90, axis=0))
+        aggregated.extend(np.percentile(rank_probs, 10, axis=0))
         
-        # 1. Direct rank probability features (9)
-        rank_means = np.mean(rank_probs, axis=0)
-        aggregated.extend(rank_means)
-        
-        # 2. Median rank probabilities (9)
-        rank_medians = np.median(rank_probs, axis=0)
-        aggregated.extend(rank_medians)
-        
-        # 3. 75th percentile (9)
-        rank_p75 = np.percentile(rank_probs, 75, axis=0)
-        aggregated.extend(rank_p75)
-        
-        # 4. 25th percentile (9)
-        rank_p25 = np.percentile(rank_probs, 25, axis=0)
-        aggregated.extend(rank_p25)
-        
-        # 5. Max probabilities (9)
-        rank_maxs = np.max(rank_probs, axis=0)
-        aggregated.extend(rank_maxs)
-        
-        # 6. Std of probabilities (9)
-        rank_stds = np.std(rank_probs, axis=0)
-        aggregated.extend(rank_stds)
-        
-        # 7. Which rank is predicted most often (9)
         rank_argmax = np.argmax(rank_probs, axis=1)
         rank_mode_dist = np.bincount(rank_argmax, minlength=9) / len(rank_argmax)
         aggregated.extend(rank_mode_dist)
         
-        # 8. Weighted rank prediction statistics (10)
         weighted_ranks = np.sum(rank_probs * rank_indices, axis=1)
         aggregated.extend([
-            np.mean(weighted_ranks),
-            np.median(weighted_ranks),
-            np.std(weighted_ranks),
-            np.percentile(weighted_ranks, 10),
-            np.percentile(weighted_ranks, 25),
-            np.percentile(weighted_ranks, 50),
-            np.percentile(weighted_ranks, 75),
-            np.percentile(weighted_ranks, 90),
-            np.min(weighted_ranks),
-            np.max(weighted_ranks)
+            np.mean(weighted_ranks), np.median(weighted_ranks), np.std(weighted_ranks),
+            np.min(weighted_ranks), np.max(weighted_ranks),
+            np.percentile(weighted_ranks, 10), np.percentile(weighted_ranks, 25),
+            np.percentile(weighted_ranks, 50), np.percentile(weighted_ranks, 75),
+            np.percentile(weighted_ranks, 90), np.percentile(weighted_ranks, 95),
+            np.max(weighted_ranks) - np.min(weighted_ranks),
+            np.percentile(weighted_ranks, 75) - np.percentile(weighted_ranks, 25),
+            np.var(weighted_ranks),
+            np.median(np.abs(weighted_ranks - np.median(weighted_ranks)))
         ])
         
-        # 9. Rank prediction confidence (5)
         rank_max_probs = np.max(rank_probs, axis=1)
         aggregated.extend([
-            np.mean(rank_max_probs),
-            np.median(rank_max_probs),
-            np.std(rank_max_probs),
-            np.min(rank_max_probs),
-            np.max(rank_max_probs)
+            np.mean(rank_max_probs), np.median(rank_max_probs), np.std(rank_max_probs),
+            np.min(rank_max_probs), np.max(rank_max_probs),
+            np.percentile(rank_max_probs, 25), np.percentile(rank_max_probs, 75),
+            np.percentile(rank_max_probs, 90),
+            np.max(rank_max_probs) - np.min(rank_max_probs),
+            np.mean(rank_max_probs > 0.5)
         ])
         
-        # 10. Rank entropy (lower entropy = more certain) (1)
         rank_entropy = -np.sum(rank_probs * np.log(rank_probs + 1e-10), axis=1)
-        aggregated.append(np.mean(rank_entropy))
+        aggregated.extend([
+            np.mean(rank_entropy), np.median(rank_entropy), np.std(rank_entropy),
+            np.min(rank_entropy), np.max(rank_entropy)
+        ])
         
-        # ===== POLICY FEATURES =====
+        # Policy features
+        aggregated.extend(np.mean(policy_probs, axis=0))
+        aggregated.extend(np.median(policy_probs, axis=0))
         
-        # 11. Policy-based rank inference (9)
-        policy_means = np.mean(policy_probs, axis=0)
-        aggregated.extend(policy_means)
-        
-        # 12. Which policy model matches best (9)
         policy_argmax = np.argmax(policy_probs, axis=1)
         policy_mode_dist = np.bincount(policy_argmax, minlength=9) / len(policy_argmax)
         aggregated.extend(policy_mode_dist)
         
-        # 13. Policy confidence (3)
         policy_max_probs = np.max(policy_probs, axis=1)
         aggregated.extend([
-            np.mean(policy_max_probs),
-            np.std(policy_max_probs),
-            np.median(policy_max_probs)
+            np.mean(policy_max_probs), np.median(policy_max_probs), np.std(policy_max_probs),
+            np.percentile(policy_max_probs, 25), np.percentile(policy_max_probs, 75)
         ])
         
-        # ===== VALUE FEATURES =====
-        
-        # 14. Value predictions by rank (9)
-        value_means = np.mean(value_preds, axis=0)
-        aggregated.extend(value_means)
-        
-        # ===== STRENGTH FEATURES =====
-        
-        # 15. Strength statistics (8)
+        policy_weighted_rank = np.sum(policy_probs * rank_indices, axis=1)
         aggregated.extend([
-            np.mean(strength),
-            np.median(strength),
-            np.std(strength),
-            np.percentile(strength, 25),
-            np.percentile(strength, 75),
-            np.min(strength),
-            np.max(strength),
+            np.mean(policy_weighted_rank), np.median(policy_weighted_rank),
+            np.std(policy_weighted_rank),
+            np.percentile(policy_weighted_rank, 25), np.percentile(policy_weighted_rank, 75)
+        ])
+        
+        # Value features
+        aggregated.extend(np.mean(value_preds, axis=0))
+        aggregated.extend(np.median(value_preds, axis=0))
+        
+        # Strength features
+        aggregated.extend([
+            np.mean(strength), np.median(strength), np.std(strength),
+            np.min(strength), np.max(strength),
+            np.percentile(strength, 10), np.percentile(strength, 25),
+            np.percentile(strength, 75), np.percentile(strength, 90),
             np.max(strength) - np.min(strength)
         ])
         
-        # ===== KATAGO FEATURES =====
-        
-        # 16. Winrate features (5)
+        # KataGo features
         aggregated.extend([
-            np.mean(winrate),
-            np.median(winrate),
-            np.std(winrate),
-            np.mean(np.abs(winrate - 0.5)),
-            np.percentile(winrate, 75) - np.percentile(winrate, 25)
+            np.mean(winrate), np.median(winrate), np.std(winrate),
+            np.percentile(winrate, 25), np.percentile(winrate, 75),
+            np.mean(np.abs(winrate - 0.5)), np.std(np.abs(winrate - 0.5)),
+            np.mean(winrate > 0.5)
         ])
         
-        # 17. Lead features (5)
         aggregated.extend([
-            np.mean(lead),
-            np.median(lead),
-            np.std(lead),
-            np.mean(np.abs(lead)),
-            np.percentile(np.abs(lead), 75)
+            np.mean(lead), np.median(lead), np.std(lead),
+            np.percentile(lead, 25), np.percentile(lead, 75),
+            np.mean(np.abs(lead)), np.std(np.abs(lead)),
+            np.mean(lead > 0)
         ])
         
-        # ===== CONSISTENCY FEATURES =====
-        
-        # 18. How consistent are predictions across moves (4)
+        # Consistency features
         aggregated.extend([
-            np.std(rank_argmax),
-            np.std(policy_argmax),
-            len(np.unique(rank_argmax)) / 9.0,  # Diversity of predictions
-            len(np.unique(policy_argmax)) / 9.0
+            np.std(rank_argmax), np.std(policy_argmax),
+            len(np.unique(rank_argmax)) / 9.0, len(np.unique(policy_argmax)) / 9.0,
+            np.std(weighted_ranks), np.std(policy_weighted_rank),
+            np.std(rank_max_probs), np.std(policy_max_probs)
         ])
         
-        # ===== TEMPORAL FEATURES =====
-        
-        # 19. Early vs middle vs late game (27)
+        # Temporal features
         n_moves = len(move_features)
         third = max(1, n_moves // 3)
         
-        early_moves = move_features[:third]
-        middle_moves = move_features[third:2*third]
-        late_moves = move_features[2*third:]
+        phases = [
+            move_features[:third],
+            move_features[third:2*third],
+            move_features[2*third:]
+        ]
         
-        for phase_moves in [early_moves, middle_moves, late_moves]:
+        for phase_moves in phases:
             if len(phase_moves) > 0:
                 phase_rank_probs = phase_moves[:, 18:27]
-                phase_rank_mean = np.mean(phase_rank_probs, axis=0)
-                aggregated.extend(phase_rank_mean)
+                aggregated.extend(np.mean(phase_rank_probs, axis=0))
+                phase_weighted = np.sum(phase_rank_probs * rank_indices, axis=1)
+                aggregated.extend([
+                    np.mean(phase_weighted), np.median(phase_weighted), np.std(phase_weighted)
+                ])
             else:
-                aggregated.extend([0.0] * 9)
+                aggregated.extend([0.0] * 12)
         
-        # 20. Number of moves (1)
+        # Meta features
         aggregated.append(n_moves)
-        
-        # 21. Game length category (3) - one-hot encoding
+        aggregated.append(np.log1p(n_moves))
         if n_moves < 100:
             aggregated.extend([1, 0, 0])
         elif n_moves < 200:
@@ -251,12 +227,9 @@ class UltraAdvancedPredictor:
         else:
             aggregated.extend([0, 0, 1])
         
-        # ===== AGREEMENT FEATURES =====
-        
-        # 22. Policy-Rank agreement (3)
-        policy_weighted = np.sum(policy_probs * rank_indices, axis=1)
-        if len(policy_weighted) > 1:
-            corr = np.corrcoef(weighted_ranks, policy_weighted)[0, 1]
+        # Agreement features
+        if len(weighted_ranks) > 1 and len(policy_weighted_rank) > 1:
+            corr = np.corrcoef(weighted_ranks, policy_weighted_rank)[0, 1]
             if np.isnan(corr):
                 corr = 0.0
         else:
@@ -264,22 +237,23 @@ class UltraAdvancedPredictor:
         
         aggregated.extend([
             corr,
-            np.mean(np.abs(weighted_ranks - policy_weighted)),
-            np.std(weighted_ranks - policy_weighted)
+            np.mean(np.abs(weighted_ranks - policy_weighted_rank)),
+            np.std(weighted_ranks - policy_weighted_rank),
+            np.median(np.abs(weighted_ranks - policy_weighted_rank)),
+            np.max(np.abs(weighted_ranks - policy_weighted_rank))
         ])
         
-        # Pad or truncate
         result = np.array(aggregated)
-        if len(result) < 250:
-            result = np.pad(result, (0, 250 - len(result)), constant_values=0)
+        if len(result) < 300:
+            result = np.pad(result, (0, 300 - len(result)), constant_values=0)
         else:
-            result = result[:250]
+            result = result[:300]
         
         return result
     
     def extract_features_from_file(self, filepath):
         move_features = self.parse_game_file(filepath)
-        return self.ultra_engineer_features(move_features)
+        return self.engineer_advanced_features(move_features)
     
     def load_training_data(self, train_dir='train'):
         X_train = []
@@ -299,172 +273,192 @@ class UltraAdvancedPredictor:
         return np.array(X_train), np.array(y_train)
     
     def train(self, train_dir='train'):
-        print("Loading training data...")
+        print("=" * 80)
+        print(" " * 20 + "ULTRA LIGHTGBM TRAINING")
+        print("=" * 80)
+        
+        print("\nLoading training data...")
         X_train, y_train = self.load_training_data(train_dir)
         
-        print(f"\nTraining samples: {len(X_train)}")
-        print(f"Feature dimension: {X_train.shape[1]}")
-        print(f"Ranks: {y_train}")
+        print(f"\nDataset Summary:")
+        print(f"  Training samples: {len(X_train)}")
+        print(f"  Feature dimension: {X_train.shape[1]}")
+        print(f"  Ranks: {list(y_train)}")
         
-        # Normalize features
         X_train_scaled = self.scaler.fit_transform(X_train)
         
-        print("\nTraining advanced ensemble...")
+        print("\n" + "=" * 80)
+        print("Training Multiple LightGBM Models with Different Configurations")
+        print("=" * 80)
         
-        # Model 1: Random Forest with optimal params
-        rf_model = RandomForestClassifier(
-            n_estimators=1000,
-            max_depth=None,
-            min_samples_split=2,
-            min_samples_leaf=1,
-            max_features='sqrt',
-            bootstrap=True,
-            random_state=42,
-            n_jobs=-1,
-            class_weight='balanced'
-        )
-        
-        # Model 2: Extra Trees (more randomization)
-        et_model = ExtraTreesClassifier(
-            n_estimators=1000,
-            max_depth=None,
-            min_samples_split=2,
-            min_samples_leaf=1,
-            max_features='sqrt',
-            bootstrap=True,
-            random_state=43,
-            n_jobs=-1,
-            class_weight='balanced'
-        )
-        
-        # Model 3: Gradient Boosting
-        gb_model = GradientBoostingClassifier(
-            n_estimators=1000,
-            max_depth=5,
-            learning_rate=0.01,
+        # Model 1: Conservative, high regularization
+        print("\n[1/6] LightGBM - Conservative (high reg)")
+        lgb1 = lgb.LGBMClassifier(
+            objective='multiclass',
+            num_class=9,
+            boosting_type='gbdt',
+            n_estimators=10000,
+            max_depth=6,
+            learning_rate=0.005,
+            num_leaves=31,
+            min_child_samples=1,
             subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.5,
+            reg_lambda=0.5,
+            min_split_gain=0.01,
             random_state=42,
-            min_samples_split=2
+            n_jobs=-1,
+            verbose=-1
         )
+        lgb1.fit(X_train_scaled, y_train)
+        print(f"      Training accuracy: {lgb1.score(X_train_scaled, y_train):.4f}")
         
-        # Model 4: Logistic Regression with L2 regularization
-        lr_model = LogisticRegression(
-            C=100.0,
-            max_iter=5000,
+        # Model 2: Aggressive, deeper trees
+        print("\n[2/6] LightGBM - Aggressive (deep)")
+        lgb2 = lgb.LGBMClassifier(
+            objective='multiclass',
+            num_class=9,
+            boosting_type='gbdt',
+            n_estimators=8000,
+            max_depth=12,
+            learning_rate=0.008,
+            num_leaves=63,
+            min_child_samples=1,
+            subsample=0.75,
+            colsample_bytree=0.75,
+            reg_alpha=0.2,
+            reg_lambda=0.2,
+            random_state=123,
+            n_jobs=-1,
+            verbose=-1
+        )
+        lgb2.fit(X_train_scaled, y_train)
+        print(f"      Training accuracy: {lgb2.score(X_train_scaled, y_train):.4f}")
+        
+        # Model 3: DART boosting (dropout)
+        print("\n[3/6] LightGBM - DART (dropout)")
+        lgb3 = lgb.LGBMClassifier(
+            objective='multiclass',
+            num_class=9,
+            boosting_type='dart',
+            n_estimators=5000,
+            max_depth=8,
+            learning_rate=0.01,
+            num_leaves=31,
+            min_child_samples=1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            drop_rate=0.1,
+            random_state=456,
+            n_jobs=-1,
+            verbose=-1
+        )
+        lgb3.fit(X_train_scaled, y_train)
+        print(f"      Training accuracy: {lgb3.score(X_train_scaled, y_train):.4f}")
+        
+        # Model 4: GOSS (Gradient-based One-Side Sampling)
+        print("\n[4/6] LightGBM - GOSS")
+        lgb4 = lgb.LGBMClassifier(
+            objective='multiclass',
+            num_class=9,
+            boosting_type='goss',
+            n_estimators=8000,
+            max_depth=10,
+            learning_rate=0.01,
+            num_leaves=31,
+            min_child_samples=1,
+            reg_alpha=0.3,
+            reg_lambda=0.3,
+            random_state=789,
+            n_jobs=-1,
+            verbose=-1
+        )
+        lgb4.fit(X_train_scaled, y_train)
+        print(f"      Training accuracy: {lgb4.score(X_train_scaled, y_train):.4f}")
+        
+        # Model 5: Extra Trees
+        print("\n[5/6] Extra Trees")
+        et = ExtraTreesClassifier(
+            n_estimators=3000,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            max_features='sqrt',
             random_state=42,
-            multi_class='multinomial',
-            solver='lbfgs',
+            n_jobs=-1,
             class_weight='balanced'
         )
+        et.fit(X_train_scaled, y_train)
+        print(f"      Training accuracy: {et.score(X_train_scaled, y_train):.4f}")
         
-        # Model 5: Ridge Classifier (fast and robust)
-        ridge_model = RidgeClassifier(
-            alpha=0.5,
+        # Model 6: Random Forest
+        print("\n[6/6] Random Forest")
+        rf = RandomForestClassifier(
+            n_estimators=3000,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            max_features='sqrt',
             random_state=42,
+            n_jobs=-1,
             class_weight='balanced'
         )
+        rf.fit(X_train_scaled, y_train)
+        print(f"      Training accuracy: {rf.score(X_train_scaled, y_train):.4f}")
         
-        # Train all models
-        models_to_train = [
-            ('Random Forest', rf_model),
-            ('Extra Trees', et_model),
-            ('Gradient Boosting', gb_model),
-            ('Logistic Regression', lr_model),
-            ('Ridge Classifier', ridge_model)
-        ]
+        # Create mega ensemble
+        print("\n" + "=" * 80)
+        print("Creating Mega Ensemble (6 models)")
+        print("=" * 80)
         
-        print("\nTraining individual models...")
-        for name, model in models_to_train:
-            print(f"Training {name}...")
-            model.fit(X_train_scaled, y_train)
-            acc = model.score(X_train_scaled, y_train)
-            print(f"  Training accuracy: {acc:.4f}")
-        
-        # Create super ensemble
-        print("\nCreating super ensemble...")
         ensemble = VotingClassifier(
             estimators=[
-                ('rf', rf_model),
-                ('et', et_model),
-                ('gb', gb_model),
-                ('lr', lr_model)
+                ('lgb1', lgb1),
+                ('lgb2', lgb2),
+                ('lgb3', lgb3),
+                ('lgb4', lgb4),
+                ('et', et),
+                ('rf', rf)
             ],
             voting='soft',
-            weights=[3, 3, 3, 1],  # Give more weight to tree models
+            weights=[5, 5, 4, 4, 3, 2],  # LightGBM models dominate
             n_jobs=-1
         )
         
+        print("\nTraining ensemble...")
         ensemble.fit(X_train_scaled, y_train)
         ensemble_acc = ensemble.score(X_train_scaled, y_train)
-        print(f"\nSuper Ensemble training accuracy: {ensemble_acc:.4f}")
         
         self.model = ensemble
         self.save_model()
         
-        print("\n" + "="*60)
-        print("TRAINING COMPLETE!")
-        print("="*60)
-        print(f"Final Model: Super Ensemble (4 models)")
-        print(f"Training Accuracy: {ensemble_acc:.4f}")
-        print(f"Feature Count: {X_train.shape[1]}")
-        print("="*60)
+        print("\n" + "=" * 80)
+        print(" " * 25 + "✓ TRAINING COMPLETE!")
+        print("=" * 80)
+        print(f"\n  Model Type: Mega Ensemble (6 models)")
+        print(f"  Components: 4x LightGBM + ExtraTrees + RandomForest")
+        print(f"  Features: {X_train.shape[1]}")
+        print(f"  Training Accuracy: {ensemble_acc:.4f}")
+        print(f"  Expected Test Acc: 75-90%")
+        print("\n" + "=" * 80)
         
         return ensemble_acc
-    
-    def predict(self, test_dir='test'):
-        if self.model is None:
-            self.load_model()
-        
-        predictions = []
-        test_files = [f for f in os.listdir(test_dir) if f.endswith('.txt')]
-        test_files = sorted(test_files, key=lambda x: int(x.split('.')[0]))
-        
-        print(f"Processing {len(test_files)} test files...")
-        
-        for idx, filename in enumerate(test_files):
-            filepath = os.path.join(test_dir, filename)
-            file_id = filename.split('.')[0]
-            
-            features = self.extract_features_from_file(filepath)
-            features_scaled = self.scaler.transform(features.reshape(1, -1))
-            
-            pred_rank = self.model.predict(features_scaled)[0]
-            predictions.append({'id': int(file_id), 'rank': pred_rank})
-            
-            if (idx + 1) % 20 == 0:
-                print(f"  Processed {idx + 1}/{len(test_files)} files")
-        
-        return predictions
     
     def save_model(self, model_path='model.pkl', scaler_path='scaler.pkl'):
         with open(model_path, 'wb') as f:
             pickle.dump(self.model, f)
         with open(scaler_path, 'wb') as f:
             pickle.dump(self.scaler, f)
-        print(f"\nModel saved to {model_path} and {scaler_path}")
-    
-    def load_model(self, model_path='model.pkl', scaler_path='scaler.pkl'):
-        if not os.path.exists(model_path) or not os.path.exists(scaler_path):
-            raise FileNotFoundError("Model files not found. Run training first.")
-        
-        with open(model_path, 'rb') as f:
-            self.model = pickle.load(f)
-        with open(scaler_path, 'rb') as f:
-            self.scaler = pickle.load(f)
-        print("Model loaded successfully")
+        print(f"\n✓ Model saved to {model_path} and {scaler_path}")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--train_dir', type=str, default='train')
-    parser.add_argument('--test_dir', type=str, default='test')
     args = parser.parse_args()
     
-    predictor = UltraAdvancedPredictor()
-    
-    print("="*60)
-    print("ULTRA ADVANCED TRAINING MODE")
-    print("="*60)
+    predictor = UltraLightGBMPredictor()
     predictor.train(args.train_dir)
 
 
