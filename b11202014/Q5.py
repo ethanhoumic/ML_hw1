@@ -1,8 +1,12 @@
 """
-Go Rank Prediction ML Model - LightGBM Version
+Go Rank Prediction ML Model - LightGBM Version (Anti-Overfitting)
 Assignment 1 Q5 - Machine Learning Class Fall 2025
 
-Uses LightGBM for superior performance on tabular data
+Key Changes to Prevent Overfitting:
+- Reduced model complexity
+- Stronger regularization
+- Simplified feature engineering
+- Conservative hyperparameters
 """
 
 import numpy as np
@@ -73,11 +77,11 @@ class LightGBMGoRankPredictor:
     
     def engineer_advanced_features(self, move_features):
         """
-        Advanced feature engineering optimized for LightGBM.
-        Focus on rank model outputs and statistical aggregations.
+        Simplified feature engineering to reduce overfitting.
+        Focus on the most important features only.
         """
         if len(move_features) == 0:
-            return np.zeros(300)
+            return np.zeros(150)  # Reduced from 300 to 150
         
         aggregated = []
         
@@ -91,185 +95,97 @@ class LightGBMGoRankPredictor:
         
         rank_indices = np.arange(1, 10)
         
-        # ===== RANK MODEL FEATURES (CRITICAL) =====
+        # ===== RANK MODEL FEATURES (MOST CRITICAL) =====
         
-        # 1. Mean rank probabilities (9)
+        # 1. Mean rank probabilities (9) - Most stable
         aggregated.extend(np.mean(rank_probs, axis=0))
         
-        # 2. Median rank probabilities (9)
+        # 2. Median rank probabilities (9) - Robust to outliers
         aggregated.extend(np.median(rank_probs, axis=0))
         
-        # 3. Std rank probabilities (9)
+        # 3. Std rank probabilities (9) - Consistency measure
         aggregated.extend(np.std(rank_probs, axis=0))
         
-        # 4. Max rank probabilities (9)
-        aggregated.extend(np.max(rank_probs, axis=0))
-        
-        # 5. Min rank probabilities (9)
-        aggregated.extend(np.min(rank_probs, axis=0))
-        
-        # 6. 25th percentile (9)
-        aggregated.extend(np.percentile(rank_probs, 25, axis=0))
-        
-        # 7. 75th percentile (9)
-        aggregated.extend(np.percentile(rank_probs, 75, axis=0))
-        
-        # 8. 90th percentile (9)
-        aggregated.extend(np.percentile(rank_probs, 90, axis=0))
-        
-        # 9. 10th percentile (9)
-        aggregated.extend(np.percentile(rank_probs, 10, axis=0))
-        
-        # 10. Mode distribution - which rank predicted most (9)
-        rank_argmax = np.argmax(rank_probs, axis=1)
-        rank_mode_dist = np.bincount(rank_argmax, minlength=9) / len(rank_argmax)
-        aggregated.extend(rank_mode_dist)
-        
-        # 11. Weighted rank statistics (15)
+        # 4. Weighted rank statistics (5) - Reduced from 15
         weighted_ranks = np.sum(rank_probs * rank_indices, axis=1)
         aggregated.extend([
             np.mean(weighted_ranks),
             np.median(weighted_ranks),
             np.std(weighted_ranks),
-            np.min(weighted_ranks),
-            np.max(weighted_ranks),
-            np.percentile(weighted_ranks, 10),
             np.percentile(weighted_ranks, 25),
-            np.percentile(weighted_ranks, 50),
-            np.percentile(weighted_ranks, 75),
-            np.percentile(weighted_ranks, 90),
-            np.percentile(weighted_ranks, 95),
-            np.max(weighted_ranks) - np.min(weighted_ranks),  # Range
-            np.percentile(weighted_ranks, 75) - np.percentile(weighted_ranks, 25),  # IQR
-            np.var(weighted_ranks),
-            np.median(np.abs(weighted_ranks - np.median(weighted_ranks)))  # MAD
+            np.percentile(weighted_ranks, 75)
         ])
         
-        # 12. Rank confidence metrics (10)
+        # 5. Rank confidence (5) - Reduced from 10
         rank_max_probs = np.max(rank_probs, axis=1)
         aggregated.extend([
             np.mean(rank_max_probs),
             np.median(rank_max_probs),
             np.std(rank_max_probs),
-            np.min(rank_max_probs),
-            np.max(rank_max_probs),
             np.percentile(rank_max_probs, 25),
-            np.percentile(rank_max_probs, 75),
-            np.percentile(rank_max_probs, 90),
-            np.max(rank_max_probs) - np.min(rank_max_probs),
-            np.mean(rank_max_probs > 0.5)  # Fraction with high confidence
+            np.percentile(rank_max_probs, 75)
         ])
         
-        # 13. Rank entropy - prediction uncertainty (5)
+        # 6. Rank entropy (3) - Reduced from 5
         rank_entropy = -np.sum(rank_probs * np.log(rank_probs + 1e-10), axis=1)
         aggregated.extend([
             np.mean(rank_entropy),
             np.median(rank_entropy),
-            np.std(rank_entropy),
-            np.min(rank_entropy),
-            np.max(rank_entropy)
+            np.std(rank_entropy)
         ])
         
-        # ===== POLICY FEATURES =====
+        # ===== POLICY FEATURES (Simplified) =====
         
-        # 14. Policy means (9)
+        # 7. Policy summary (9)
         aggregated.extend(np.mean(policy_probs, axis=0))
         
-        # 15. Policy medians (9)
-        aggregated.extend(np.median(policy_probs, axis=0))
-        
-        # 16. Policy mode distribution (9)
-        policy_argmax = np.argmax(policy_probs, axis=1)
-        policy_mode_dist = np.bincount(policy_argmax, minlength=9) / len(policy_argmax)
-        aggregated.extend(policy_mode_dist)
-        
-        # 17. Policy confidence (5)
+        # 8. Policy confidence (3)
         policy_max_probs = np.max(policy_probs, axis=1)
         aggregated.extend([
             np.mean(policy_max_probs),
             np.median(policy_max_probs),
-            np.std(policy_max_probs),
-            np.percentile(policy_max_probs, 25),
-            np.percentile(policy_max_probs, 75)
+            np.std(policy_max_probs)
         ])
         
-        # 18. Policy-weighted rank (5)
-        policy_weighted_rank = np.sum(policy_probs * rank_indices, axis=1)
-        aggregated.extend([
-            np.mean(policy_weighted_rank),
-            np.median(policy_weighted_rank),
-            np.std(policy_weighted_rank),
-            np.percentile(policy_weighted_rank, 25),
-            np.percentile(policy_weighted_rank, 75)
-        ])
+        # ===== VALUE FEATURES (Simplified) =====
         
-        # ===== VALUE FEATURES =====
-        
-        # 19. Value means (9)
+        # 9. Value summary (9)
         aggregated.extend(np.mean(value_preds, axis=0))
-        
-        # 20. Value medians (9)
-        aggregated.extend(np.median(value_preds, axis=0))
         
         # ===== STRENGTH FEATURES =====
         
-        # 21. Strength statistics (10)
+        # 10. Strength statistics (5)
         aggregated.extend([
             np.mean(strength),
             np.median(strength),
             np.std(strength),
-            np.min(strength),
-            np.max(strength),
-            np.percentile(strength, 10),
             np.percentile(strength, 25),
-            np.percentile(strength, 75),
-            np.percentile(strength, 90),
-            np.max(strength) - np.min(strength)
+            np.percentile(strength, 75)
         ])
         
         # ===== KATAGO FEATURES =====
         
-        # 22. Winrate features (8)
+        # 11. Winrate features (5)
         aggregated.extend([
             np.mean(winrate),
             np.median(winrate),
             np.std(winrate),
             np.percentile(winrate, 25),
-            np.percentile(winrate, 75),
-            np.mean(np.abs(winrate - 0.5)),
-            np.std(np.abs(winrate - 0.5)),
-            np.mean(winrate > 0.5)  # Fraction winning
+            np.percentile(winrate, 75)
         ])
         
-        # 23. Lead features (8)
+        # 12. Lead features (5)
         aggregated.extend([
             np.mean(lead),
             np.median(lead),
             np.std(lead),
             np.percentile(lead, 25),
-            np.percentile(lead, 75),
-            np.mean(np.abs(lead)),
-            np.std(np.abs(lead)),
-            np.mean(lead > 0)  # Fraction ahead
+            np.percentile(lead, 75)
         ])
         
-        # ===== CONSISTENCY FEATURES =====
+        # ===== TEMPORAL FEATURES (Simplified) =====
         
-        # 24. Prediction consistency (8)
-        aggregated.extend([
-            np.std(rank_argmax),
-            np.std(policy_argmax),
-            len(np.unique(rank_argmax)) / 9.0,
-            len(np.unique(policy_argmax)) / 9.0,
-            np.std(weighted_ranks),
-            np.std(policy_weighted_rank),
-            np.std(rank_max_probs),
-            np.std(policy_max_probs)
-        ])
-        
-        # ===== TEMPORAL FEATURES =====
-        
-        # 25. Early/middle/late game analysis (36)
+        # 13. Early/middle/late game analysis (27)
         n_moves = len(move_features)
         third = max(1, n_moves // 3)
         
@@ -284,51 +200,29 @@ class LightGBMGoRankPredictor:
                 phase_rank_probs = phase_moves[:, 18:27]
                 # Mean rank probs per phase (9)
                 aggregated.extend(np.mean(phase_rank_probs, axis=0))
-                # Weighted rank per phase (3)
-                phase_weighted = np.sum(phase_rank_probs * rank_indices, axis=1)
-                aggregated.extend([
-                    np.mean(phase_weighted),
-                    np.median(phase_weighted),
-                    np.std(phase_weighted)
-                ])
             else:
-                aggregated.extend([0.0] * 12)
+                aggregated.extend([0.0] * 9)
         
         # ===== META FEATURES =====
         
-        # 26. Game characteristics (5)
-        aggregated.append(n_moves)
-        aggregated.append(np.log1p(n_moves))  # Log scale
-        # Game length categories (one-hot)
-        if n_moves < 100:
-            aggregated.extend([1, 0, 0])
-        elif n_moves < 200:
-            aggregated.extend([0, 1, 0])
-        else:
-            aggregated.extend([0, 0, 1])
+        # 14. Game length (2)
+        aggregated.append(np.log1p(n_moves))  # Log scale to reduce variance
+        aggregated.append(min(n_moves / 300.0, 1.0))  # Normalized
         
-        # 27. Agreement features (5)
-        if len(weighted_ranks) > 1 and len(policy_weighted_rank) > 1:
-            corr = np.corrcoef(weighted_ranks, policy_weighted_rank)[0, 1]
-            if np.isnan(corr):
-                corr = 0.0
-        else:
-            corr = 0.0
-        
+        # 15. Consistency (3)
+        rank_argmax = np.argmax(rank_probs, axis=1)
         aggregated.extend([
-            corr,
-            np.mean(np.abs(weighted_ranks - policy_weighted_rank)),
-            np.std(weighted_ranks - policy_weighted_rank),
-            np.median(np.abs(weighted_ranks - policy_weighted_rank)),
-            np.max(np.abs(weighted_ranks - policy_weighted_rank))
+            np.std(rank_argmax),
+            np.std(weighted_ranks),
+            len(np.unique(rank_argmax)) / 9.0
         ])
         
-        # Pad or truncate to 300
+        # Pad or truncate to 150
         result = np.array(aggregated)
-        if len(result) < 300:
-            result = np.pad(result, (0, 300 - len(result)), constant_values=0)
+        if len(result) < 150:
+            result = np.pad(result, (0, 150 - len(result)), constant_values=0)
         else:
-            result = result[:300]
+            result = result[:150]
         
         return result
     
@@ -355,7 +249,7 @@ class LightGBMGoRankPredictor:
     
     def train(self, train_dir='train'):
         print("=" * 70)
-        print("LIGHTGBM TRAINING MODE")
+        print("LIGHTGBM TRAINING MODE (ANTI-OVERFITTING)")
         print("=" * 70)
         
         print("\nLoading training data...")
@@ -369,70 +263,55 @@ class LightGBMGoRankPredictor:
         X_train_scaled = self.scaler.fit_transform(X_train)
         
         print("\n" + "=" * 70)
-        print("Training LightGBM models...")
+        print("Training Conservative Models (Reduced Complexity)...")
         print("=" * 70)
         
-        # LightGBM Model 1: Focus on accuracy
+        # LightGBM Model 1: Very conservative
         lgb_model1 = lgb.LGBMClassifier(
             objective='multiclass',
             num_class=9,
             boosting_type='gbdt',
-            n_estimators=5000,
-            max_depth=8,
-            learning_rate=0.01,
-            num_leaves=31,
+            n_estimators=200,  # Reduced from 5000
+            max_depth=4,  # Reduced from 8
+            learning_rate=0.05,  # Increased for faster convergence
+            num_leaves=15,  # Reduced from 31
             min_child_samples=1,
             subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=0.1,
+            colsample_bytree=0.6,  # Reduced feature sampling
+            reg_alpha=1.0,  # Increased regularization
+            reg_lambda=1.0,  # Increased regularization
+            min_split_gain=0.1,  # Prevent splitting on noise
             random_state=42,
             n_jobs=-1,
             verbose=-1
         )
         
-        # LightGBM Model 2: Different hyperparameters
+        # LightGBM Model 2: Moderate
         lgb_model2 = lgb.LGBMClassifier(
             objective='multiclass',
             num_class=9,
             boosting_type='gbdt',
-            n_estimators=5000,
-            max_depth=10,
-            learning_rate=0.005,
-            num_leaves=63,
+            n_estimators=300,  # Reduced from 5000
+            max_depth=5,  # Reduced from 10
+            learning_rate=0.03,
+            num_leaves=20,  # Reduced from 63
             min_child_samples=1,
             subsample=0.7,
             colsample_bytree=0.7,
-            reg_alpha=0.2,
-            reg_lambda=0.2,
+            reg_alpha=0.8,  # Increased regularization
+            reg_lambda=0.8,
+            min_split_gain=0.05,
             random_state=123,
             n_jobs=-1,
             verbose=-1
         )
         
-        # LightGBM Model 3: DART boosting
-        lgb_model3 = lgb.LGBMClassifier(
-            objective='multiclass',
-            num_class=9,
-            boosting_type='dart',
-            n_estimators=3000,
-            max_depth=7,
-            learning_rate=0.01,
-            num_leaves=31,
-            min_child_samples=1,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=456,
-            n_jobs=-1,
-            verbose=-1
-        )
-        
-        # Random Forest as backup
+        # Random Forest: Conservative
         rf_model = RandomForestClassifier(
-            n_estimators=2000,
-            max_depth=None,
-            min_samples_split=2,
-            min_samples_leaf=1,
+            n_estimators=500,  # Reduced from 2000
+            max_depth=8,  # Limited depth
+            min_samples_split=3,  # Increased from 2
+            min_samples_leaf=2,  # Increased from 1
             max_features='sqrt',
             random_state=42,
             n_jobs=-1,
@@ -440,43 +319,45 @@ class LightGBMGoRankPredictor:
         )
         
         # Train all models
-        print("\n1. Training LightGBM Model 1 (GBDT, depth=8)...")
+        print("\n1. Training LightGBM Model 1 (Conservative)...")
         lgb_model1.fit(X_train_scaled, y_train)
-        print(f"   Training accuracy: {lgb_model1.score(X_train_scaled, y_train):.4f}")
+        acc1 = lgb_model1.score(X_train_scaled, y_train)
+        print(f"   Training accuracy: {acc1:.4f}")
         
-        print("\n2. Training LightGBM Model 2 (GBDT, depth=10)...")
+        print("\n2. Training LightGBM Model 2 (Moderate)...")
         lgb_model2.fit(X_train_scaled, y_train)
-        print(f"   Training accuracy: {lgb_model2.score(X_train_scaled, y_train):.4f}")
+        acc2 = lgb_model2.score(X_train_scaled, y_train)
+        print(f"   Training accuracy: {acc2:.4f}")
         
-        print("\n3. Training LightGBM Model 3 (DART)...")
-        lgb_model3.fit(X_train_scaled, y_train)
-        print(f"   Training accuracy: {lgb_model3.score(X_train_scaled, y_train):.4f}")
-        
-        print("\n4. Training Random Forest...")
+        print("\n3. Training Random Forest (Conservative)...")
         rf_model.fit(X_train_scaled, y_train)
-        print(f"   Training accuracy: {rf_model.score(X_train_scaled, y_train):.4f}")
+        acc3 = rf_model.score(X_train_scaled, y_train)
+        print(f"   Training accuracy: {acc3:.4f}")
         
-        # Create super ensemble
+        # Create ensemble with fewer models
         print("\n" + "=" * 70)
-        print("Creating LightGBM Super Ensemble...")
+        print("Creating Conservative Ensemble...")
         print("=" * 70)
         
         ensemble = VotingClassifier(
             estimators=[
                 ('lgb1', lgb_model1),
                 ('lgb2', lgb_model2),
-                ('lgb3', lgb_model3),
                 ('rf', rf_model)
             ],
             voting='soft',
-            weights=[4, 4, 3, 2],  # LightGBM models get more weight
+            weights=[2, 2, 1],  # Equal-ish weights
             n_jobs=-1
         )
         
         ensemble.fit(X_train_scaled, y_train)
         ensemble_acc = ensemble.score(X_train_scaled, y_train)
         
-        print(f"\nSuper Ensemble Training Accuracy: {ensemble_acc:.4f}")
+        print(f"\nEnsemble Training Accuracy: {ensemble_acc:.4f}")
+        
+        if ensemble_acc > 0.95:
+            print("\n⚠️  WARNING: Training accuracy very high (>95%)")
+            print("    Model may still overfit. Consider further regularization.")
         
         self.model = ensemble
         self.save_model()
@@ -484,9 +365,10 @@ class LightGBMGoRankPredictor:
         print("\n" + "=" * 70)
         print("✓ TRAINING COMPLETE!")
         print("=" * 70)
-        print(f"Model: LightGBM Super Ensemble (4 models)")
-        print(f"Features: {X_train.shape[1]}")
+        print(f"Model: Conservative Ensemble (3 models)")
+        print(f"Features: {X_train.shape[1]} (reduced from 300)")
         print(f"Training Accuracy: {ensemble_acc:.4f}")
+        print(f"Individual accuracies: {acc1:.4f}, {acc2:.4f}, {acc3:.4f}")
         print("=" * 70)
         
         return ensemble_acc
@@ -518,14 +400,14 @@ class LightGBMGoRankPredictor:
         
         return predictions
     
-    def save_model(self, model_path='model.pkl', scaler_path='scaler.pkl'):
+    def save_model(self, model_path='model_antioverfit.pkl', scaler_path='scaler_antioverfit.pkl'):
         with open(model_path, 'wb') as f:
             pickle.dump(self.model, f)
         with open(scaler_path, 'wb') as f:
             pickle.dump(self.scaler, f)
         print(f"\n✓ Model saved to {model_path} and {scaler_path}")
     
-    def load_model(self, model_path='model.pkl', scaler_path='scaler.pkl'):
+    def load_model(self, model_path='model_antioverfit.pkl', scaler_path='scaler_antioverfit.pkl'):
         if not os.path.exists(model_path) or not os.path.exists(scaler_path):
             raise FileNotFoundError(
                 "Model files not found. Run training first:\n"
