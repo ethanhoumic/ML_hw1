@@ -5,6 +5,7 @@ import pandas as pd
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
+from scipy import stats
 import pickle
 import argparse
 
@@ -120,21 +121,44 @@ def parse_game_file(filepath, split_games=False):
         return features_list
 
 def aggregate_features(features_list):
-    """Aggregate features from multiple moves into a single sample."""
+    """Aggregate features from multiple moves into a single sample with enhanced statistics."""
     if not features_list:
         return None
     
     features_array = np.array(features_list)
     
-    # Compute statistics: mean, std, min, max, median
+    # Basic statistics: mean, std, min, max, median
     mean_features = np.mean(features_array, axis=0)
     std_features = np.std(features_array, axis=0)
     min_features = np.min(features_array, axis=0)
     max_features = np.max(features_array, axis=0)
     median_features = np.median(features_array, axis=0)
     
+    # Additional statistics for better discrimination
+    q25_features = np.percentile(features_array, 25, axis=0)
+    q75_features = np.percentile(features_array, 75, axis=0)
+    
+    # Skewness and kurtosis (distribution shape)
+    from scipy import stats
+    skew_features = stats.skew(features_array, axis=0)
+    kurt_features = stats.kurtosis(features_array, axis=0)
+    
+    # Replace any NaN values with 0
+    skew_features = np.nan_to_num(skew_features, nan=0.0)
+    kurt_features = np.nan_to_num(kurt_features, nan=0.0)
+    
     # Concatenate all statistics
-    aggregated = np.concatenate([mean_features, std_features, min_features, max_features, median_features])
+    aggregated = np.concatenate([
+        mean_features, 
+        std_features, 
+        min_features, 
+        max_features, 
+        median_features,
+        q25_features,
+        q75_features,
+        skew_features,
+        kurt_features
+    ])
     
     return aggregated
 
@@ -230,19 +254,23 @@ def train_model(X_train, y_train, output_path='lgb_model.pkl'):
     print("\nTraining LightGBM model...")
     
     # Split for validation
-    X_tr, X_val, y_tr, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42, stratify=y_train)
+    X_tr, X_val, y_tr, y_val = train_test_split(X_train, y_train, test_size=0.15, random_state=42, stratify=y_train)
     
-    # LightGBM parameters
+    # LightGBM parameters - improved from baseline
     params = {
         'objective': 'multiclass',
         'num_class': 9,
         'metric': 'multi_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 31,
-        'learning_rate': 0.05,
-        'feature_fraction': 0.8,
-        'bagging_fraction': 0.8,
+        'num_leaves': 63,
+        'max_depth': 8,
+        'learning_rate': 0.03,
+        'feature_fraction': 0.9,
+        'bagging_fraction': 0.9,
         'bagging_freq': 5,
+        'min_data_in_leaf': 20,
+        'lambda_l1': 0.5,
+        'lambda_l2': 0.5,
         'verbose': -1,
         'random_state': 42
     }
@@ -255,10 +283,10 @@ def train_model(X_train, y_train, output_path='lgb_model.pkl'):
     model = lgb.train(
         params,
         train_data,
-        num_boost_round=1000,
+        num_boost_round=2000,
         valid_sets=[train_data, val_data],
         valid_names=['train', 'valid'],
-        callbacks=[lgb.early_stopping(stopping_rounds=50), lgb.log_evaluation(50)]
+        callbacks=[lgb.early_stopping(stopping_rounds=100), lgb.log_evaluation(50)]
     )
     
     # Evaluate
