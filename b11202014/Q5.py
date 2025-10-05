@@ -152,20 +152,39 @@ def aggregate_features(features_list):
     skew_features = np.nan_to_num(skew_features, nan=0.0)
     kurt_features = np.nan_to_num(kurt_features, nan=0.0)
     
-    # Cross-features: relationships between the 9 rank model outputs
-    # Extract rank model outputs (indices 18-26)
-    rank_outputs = features_array[:, 18:27]
-    rank_mean = np.mean(rank_outputs, axis=0)
-    rank_std = np.std(rank_outputs, axis=0)
+    # === Key Domain-Specific Features (Not Temporal) ===
     
-    # Entropy of rank outputs (measure of uncertainty)
+    # 1. Rank model analysis (indices 18-26) - MOST IMPORTANT
+    rank_outputs = features_array[:, 18:27]
+    
+    # Average rank prediction per move
+    rank_argmax_per_move = np.argmax(rank_outputs, axis=1)
+    rank_prediction_mean = np.mean(rank_argmax_per_move)
+    rank_prediction_std = np.std(rank_argmax_per_move)
+    
+    # Confidence: max probability among rank predictions
+    rank_confidence = np.max(rank_outputs, axis=1)
+    rank_confidence_mean = np.mean(rank_confidence)
+    rank_confidence_std = np.std(rank_confidence)
+    
+    # Entropy of rank outputs (uncertainty measure)
     rank_entropy = []
     for i in range(rank_outputs.shape[0]):
-        probs = rank_outputs[i, :] + 1e-10  # Avoid log(0)
+        probs = rank_outputs[i, :] + 1e-10
         probs = probs / probs.sum()
         entropy = -np.sum(probs * np.log(probs))
         rank_entropy.append(entropy)
-    rank_entropy_stats = [np.mean(rank_entropy), np.std(rank_entropy), np.max(rank_entropy), np.min(rank_entropy)]
+    rank_entropy_mean = np.mean(rank_entropy)
+    rank_entropy_std = np.std(rank_entropy)
+    
+    # 2. Weighted rank prediction (use probability-weighted average)
+    weighted_rank_preds = []
+    for i in range(rank_outputs.shape[0]):
+        probs = rank_outputs[i, :]
+        weighted_rank = np.sum(probs * np.arange(9))
+        weighted_rank_preds.append(weighted_rank)
+    weighted_rank_mean = np.mean(weighted_rank_preds)
+    weighted_rank_std = np.std(weighted_rank_preds)
     
     # Concatenate all statistics
     aggregated = np.concatenate([
@@ -182,9 +201,10 @@ def aggregate_features(features_list):
         iqr_features,
         skew_features,
         kurt_features,
-        rank_mean,
-        rank_std,
-        rank_entropy_stats
+        [rank_prediction_mean, rank_prediction_std],
+        [rank_confidence_mean, rank_confidence_std],
+        [rank_entropy_mean, rank_entropy_std],
+        [weighted_rank_mean, weighted_rank_std]
     ])
     
     return aggregated
@@ -308,13 +328,27 @@ def train_model_ensemble(X_train, y_train, output_path='lgb_model.pkl', n_models
     models = []
     accuracies = []
     
-    # Different configurations for diversity
+    # Back to configurations that worked well (88%)
     configs = [
-        {'num_leaves': 63, 'max_depth': 8, 'learning_rate': 0.03, 'lambda_l1': 0.5, 'lambda_l2': 0.5},
-        {'num_leaves': 95, 'max_depth': 9, 'learning_rate': 0.025, 'lambda_l1': 0.3, 'lambda_l2': 0.3},
-        {'num_leaves': 47, 'max_depth': 7, 'learning_rate': 0.04, 'lambda_l1': 0.7, 'lambda_l2': 0.7},
-        {'num_leaves': 80, 'max_depth': 10, 'learning_rate': 0.02, 'lambda_l1': 0.4, 'lambda_l2': 0.4},
-        {'num_leaves': 55, 'max_depth': 8, 'learning_rate': 0.035, 'lambda_l1': 0.6, 'lambda_l2': 0.6},
+        # Model 1: Balanced, proven good
+        {'num_leaves': 63, 'max_depth': 8, 'learning_rate': 0.03, 'lambda_l1': 0.5, 'lambda_l2': 0.5,
+         'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
+        
+        # Model 2: Slightly more complex
+        {'num_leaves': 95, 'max_depth': 9, 'learning_rate': 0.025, 'lambda_l1': 0.3, 'lambda_l2': 0.3,
+         'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
+        
+        # Model 3: More conservative
+        {'num_leaves': 47, 'max_depth': 7, 'learning_rate': 0.04, 'lambda_l1': 0.7, 'lambda_l2': 0.7,
+         'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
+        
+        # Model 4: Deep but regularized
+        {'num_leaves': 80, 'max_depth': 10, 'learning_rate': 0.02, 'lambda_l1': 0.4, 'lambda_l2': 0.4,
+         'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
+        
+        # Model 5: Alternative balanced
+        {'num_leaves': 55, 'max_depth': 8, 'learning_rate': 0.035, 'lambda_l1': 0.6, 'lambda_l2': 0.6,
+         'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
     ]
     
     for i in range(n_models):
@@ -328,16 +362,13 @@ def train_model_ensemble(X_train, y_train, output_path='lgb_model.pkl', n_models
             'num_class': 9,
             'metric': 'multi_logloss',
             'boosting_type': 'gbdt',
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.9,
-            'bagging_freq': 5,
-            'min_data_in_leaf': 20,
             'verbose': -1,
             'seed': 42 + i,
+            'bagging_freq': 5,
             **config
         }
         
-        model, acc = train_single_model(X_train, y_train, params)
+        model, acc = train_single_model(X_train, y_train, params, num_boost_round=2000)
         models.append(model)
         accuracies.append(acc)
         print(f"Model {i+1} Validation Accuracy: {acc:.4f}")
@@ -345,6 +376,7 @@ def train_model_ensemble(X_train, y_train, output_path='lgb_model.pkl', n_models
     avg_accuracy = np.mean(accuracies)
     print(f"\n{'='*60}")
     print(f"Ensemble Average Validation Accuracy: {avg_accuracy:.4f}")
+    print(f"Best Single Model Accuracy: {max(accuracies):.4f}")
     print('='*60)
     
     # Save ensemble
