@@ -1,460 +1,357 @@
-"""
-Go Rank Prediction ML Model - LightGBM Version (Anti-Overfitting)
-Assignment 1 Q5 - Machine Learning Class Fall 2025
-
-Key Changes to Prevent Overfitting:
-- Reduced model complexity
-- Stronger regularization
-- Simplified feature engineering
-- Conservative hyperparameters
-"""
-
+import os
+import re
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
-from sklearn.preprocessing import RobustScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 import pickle
-import os
 import argparse
 
+def debug_file_format(filepath, num_lines=50):
+    """Debug helper to inspect file format."""
+    print(f"\n{'='*60}")
+    print(f"DEBUG: First {num_lines} lines of {filepath}")
+    print('='*60)
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if i >= num_lines:
+                    break
+                print(f"Line {i}: {repr(line.strip())}")
+    except Exception as e:
+        print(f"Error reading file: {e}")
+    print('='*60)
 
-class LightGBMGoRankPredictor:
-    def __init__(self):
-        self.model = None
-        self.scaler = RobustScaler()
-        
-    def parse_game_file(self, filepath):
-        """Parse a single game file and extract features from all moves."""
+def parse_game_file(filepath, split_games=False):
+    """Parse a single game file and extract features.
+    
+    Args:
+        filepath: Path to the file
+        split_games: If True, return features split by game. If False, return all features together.
+    
+    Returns:
+        If split_games=True: List of lists (each inner list is features for one game)
+        If split_games=False: Single list of all features
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    if split_games:
+        games_features = []
+        current_game_features = []
+    else:
         features_list = []
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
         
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-        except:
-            with open(filepath, 'r', encoding='latin-1') as f:
-                lines = f.readlines()
+        # Game header indicates start of new game
+        if line.startswith('Game'):
+            if split_games and current_game_features:
+                # Save previous game
+                games_features.append(current_game_features)
+                current_game_features = []
+            i += 1
+            continue
         
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
+        # Skip empty lines
+        if not line:
+            i += 1
+            continue
+        
+        # Check if this line contains a move (starts with B[ or W[)
+        if re.match(r'^[BW]\[', line):
+            move = line
+            color = 'B' if move[0] == 'B' else 'W'
             
-            if line.startswith('B[') or line.startswith('W['):
-                move_color = line[0]
-                
+            # Check if we have enough lines for a complete move
+            if i + 4 < len(lines):
                 try:
-                    policy_line = lines[i + 1].strip().split()
-                    value_line = lines[i + 2].strip().split()
-                    rank_line = lines[i + 3].strip().split()
-                    strength_line = lines[i + 4].strip()
-                    katago_line = lines[i + 5].strip().split()
+                    # Line i+1: Policy probabilities (9 values)
+                    policy_probs = [float(x) for x in lines[i+1].strip().split()]
                     
-                    policy_probs = [float(x) for x in policy_line]
-                    value_preds = [float(x.rstrip('%')) / 100.0 for x in value_line]
-                    rank_probs = [float(x) for x in rank_line]
-                    strength_score = float(strength_line)
+                    # Line i+2: Value predictions (9 values with % signs)
+                    value_line = lines[i+2].strip()
+                    value_preds = [float(x.replace('%', '')) / 100.0 for x in value_line.split()]
                     
-                    winrate = float(katago_line[0].rstrip('%')) / 100.0
-                    lead = float(katago_line[1])
-                    uncertainty = float(katago_line[2])
+                    # Line i+3: Rank model outputs (9 values)
+                    rank_outputs = [float(x) for x in lines[i+3].strip().split()]
                     
-                    if move_color == 'W':
+                    # Line i+4: Strength score (1 value)
+                    strength_score = float(lines[i+4].strip())
+                    
+                    # Line i+5: KataGo values (3 values)
+                    katago_parts = lines[i+5].strip().split()
+                    winrate = float(katago_parts[0].replace('%', '')) / 100.0
+                    lead = float(katago_parts[1])
+                    uncertainty = float(katago_parts[2])
+                    
+                    # Adjust KataGo values based on player color
+                    if color == 'W':
                         winrate = 1.0 - winrate
                         lead = -lead
                     
-                    move_features = policy_probs + value_preds + rank_probs + \
-                                   [strength_score, winrate, lead, uncertainty]
+                    # Verify we have the correct number of features
+                    if len(policy_probs) == 9 and len(value_preds) == 9 and len(rank_outputs) == 9:
+                        # Construct feature vector (30 features total)
+                        features = policy_probs + value_preds + rank_outputs + [strength_score, winrate, lead, uncertainty]
+                        
+                        if split_games:
+                            current_game_features.append(features)
+                        else:
+                            features_list.append(features)
                     
-                    features_list.append(move_features)
-                    i += 6
-                except (IndexError, ValueError):
+                    i += 6  # Move to next move block (move + 5 feature lines)
+                except (ValueError, IndexError) as e:
+                    # Skip malformed entries
                     i += 1
-                    continue
             else:
                 i += 1
-        
-        return np.array(features_list) if features_list else np.zeros((0, 30))
-    
-    def engineer_advanced_features(self, move_features):
-        """
-        Simplified feature engineering to reduce overfitting.
-        Focus on the most important features only.
-        """
-        if len(move_features) == 0:
-            return np.zeros(150)  # Reduced from 300 to 150
-        
-        aggregated = []
-        
-        # Extract feature groups
-        policy_probs = move_features[:, 0:9]
-        value_preds = move_features[:, 9:18]
-        rank_probs = move_features[:, 18:27]  # MOST IMPORTANT
-        strength = move_features[:, 27]
-        winrate = move_features[:, 28]
-        lead = move_features[:, 29]
-        
-        rank_indices = np.arange(1, 10)
-        
-        # ===== RANK MODEL FEATURES (MOST CRITICAL) =====
-        
-        # 1. Mean rank probabilities (9) - Most stable
-        aggregated.extend(np.mean(rank_probs, axis=0))
-        
-        # 2. Median rank probabilities (9) - Robust to outliers
-        aggregated.extend(np.median(rank_probs, axis=0))
-        
-        # 3. Std rank probabilities (9) - Consistency measure
-        aggregated.extend(np.std(rank_probs, axis=0))
-        
-        # 4. Weighted rank statistics (5) - Reduced from 15
-        weighted_ranks = np.sum(rank_probs * rank_indices, axis=1)
-        aggregated.extend([
-            np.mean(weighted_ranks),
-            np.median(weighted_ranks),
-            np.std(weighted_ranks),
-            np.percentile(weighted_ranks, 25),
-            np.percentile(weighted_ranks, 75)
-        ])
-        
-        # 5. Rank confidence (5) - Reduced from 10
-        rank_max_probs = np.max(rank_probs, axis=1)
-        aggregated.extend([
-            np.mean(rank_max_probs),
-            np.median(rank_max_probs),
-            np.std(rank_max_probs),
-            np.percentile(rank_max_probs, 25),
-            np.percentile(rank_max_probs, 75)
-        ])
-        
-        # 6. Rank entropy (3) - Reduced from 5
-        rank_entropy = -np.sum(rank_probs * np.log(rank_probs + 1e-10), axis=1)
-        aggregated.extend([
-            np.mean(rank_entropy),
-            np.median(rank_entropy),
-            np.std(rank_entropy)
-        ])
-        
-        # ===== POLICY FEATURES (Simplified) =====
-        
-        # 7. Policy summary (9)
-        aggregated.extend(np.mean(policy_probs, axis=0))
-        
-        # 8. Policy confidence (3)
-        policy_max_probs = np.max(policy_probs, axis=1)
-        aggregated.extend([
-            np.mean(policy_max_probs),
-            np.median(policy_max_probs),
-            np.std(policy_max_probs)
-        ])
-        
-        # ===== VALUE FEATURES (Simplified) =====
-        
-        # 9. Value summary (9)
-        aggregated.extend(np.mean(value_preds, axis=0))
-        
-        # ===== STRENGTH FEATURES =====
-        
-        # 10. Strength statistics (5)
-        aggregated.extend([
-            np.mean(strength),
-            np.median(strength),
-            np.std(strength),
-            np.percentile(strength, 25),
-            np.percentile(strength, 75)
-        ])
-        
-        # ===== KATAGO FEATURES =====
-        
-        # 11. Winrate features (5)
-        aggregated.extend([
-            np.mean(winrate),
-            np.median(winrate),
-            np.std(winrate),
-            np.percentile(winrate, 25),
-            np.percentile(winrate, 75)
-        ])
-        
-        # 12. Lead features (5)
-        aggregated.extend([
-            np.mean(lead),
-            np.median(lead),
-            np.std(lead),
-            np.percentile(lead, 25),
-            np.percentile(lead, 75)
-        ])
-        
-        # ===== TEMPORAL FEATURES (Simplified) =====
-        
-        # 13. Early/middle/late game analysis (27)
-        n_moves = len(move_features)
-        third = max(1, n_moves // 3)
-        
-        phases = [
-            move_features[:third],           # Early
-            move_features[third:2*third],    # Middle
-            move_features[2*third:]          # Late
-        ]
-        
-        for phase_moves in phases:
-            if len(phase_moves) > 0:
-                phase_rank_probs = phase_moves[:, 18:27]
-                # Mean rank probs per phase (9)
-                aggregated.extend(np.mean(phase_rank_probs, axis=0))
-            else:
-                aggregated.extend([0.0] * 9)
-        
-        # ===== META FEATURES =====
-        
-        # 14. Game length (2)
-        aggregated.append(np.log1p(n_moves))  # Log scale to reduce variance
-        aggregated.append(min(n_moves / 300.0, 1.0))  # Normalized
-        
-        # 15. Consistency (3)
-        rank_argmax = np.argmax(rank_probs, axis=1)
-        aggregated.extend([
-            np.std(rank_argmax),
-            np.std(weighted_ranks),
-            len(np.unique(rank_argmax)) / 9.0
-        ])
-        
-        # Pad or truncate to 150
-        result = np.array(aggregated)
-        if len(result) < 150:
-            result = np.pad(result, (0, 150 - len(result)), constant_values=0)
         else:
-            result = result[:150]
-        
-        return result
+            i += 1
     
-    def extract_features_from_file(self, filepath):
-        move_features = self.parse_game_file(filepath)
-        return self.engineer_advanced_features(move_features)
-    
-    def load_training_data(self, train_dir='train'):
-        X_train = []
-        y_train = []
-        
-        for rank in range(1, 10):
-            filename = f'log_{rank}D_policy_train.txt'
-            filepath = os.path.join(train_dir, filename)
-            
-            if os.path.exists(filepath):
-                print(f"Loading {filename}...")
-                features = self.extract_features_from_file(filepath)
-                X_train.append(features)
-                y_train.append(rank)
-                print(f"  Rank {rank}: features shape = {features.shape}")
-        
-        return np.array(X_train), np.array(y_train)
-    
-    def train(self, train_dir='train'):
-        print("=" * 70)
-        print("LIGHTGBM TRAINING MODE (ANTI-OVERFITTING)")
-        print("=" * 70)
-        
-        print("\nLoading training data...")
-        X_train, y_train = self.load_training_data(train_dir)
-        
-        print(f"\nTraining samples: {len(X_train)}")
-        print(f"Feature dimension: {X_train.shape[1]}")
-        print(f"Ranks: {y_train}")
-        
-        # Normalize features
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        
-        print("\n" + "=" * 70)
-        print("Training Conservative Models (Reduced Complexity)...")
-        print("=" * 70)
-        
-        # LightGBM Model 1: Very conservative
-        lgb_model1 = lgb.LGBMClassifier(
-            objective='multiclass',
-            num_class=9,
-            boosting_type='gbdt',
-            n_estimators=200,  # Reduced from 5000
-            max_depth=4,  # Reduced from 8
-            learning_rate=0.05,  # Increased for faster convergence
-            num_leaves=15,  # Reduced from 31
-            min_child_samples=1,
-            subsample=0.8,
-            colsample_bytree=0.6,  # Reduced feature sampling
-            reg_alpha=1.0,  # Increased regularization
-            reg_lambda=1.0,  # Increased regularization
-            min_split_gain=0.1,  # Prevent splitting on noise
-            random_state=42,
-            n_jobs=-1,
-            verbose=-1
-        )
-        
-        # LightGBM Model 2: Moderate
-        lgb_model2 = lgb.LGBMClassifier(
-            objective='multiclass',
-            num_class=9,
-            boosting_type='gbdt',
-            n_estimators=300,  # Reduced from 5000
-            max_depth=5,  # Reduced from 10
-            learning_rate=0.03,
-            num_leaves=20,  # Reduced from 63
-            min_child_samples=1,
-            subsample=0.7,
-            colsample_bytree=0.7,
-            reg_alpha=0.8,  # Increased regularization
-            reg_lambda=0.8,
-            min_split_gain=0.05,
-            random_state=123,
-            n_jobs=-1,
-            verbose=-1
-        )
-        
-        # Random Forest: Conservative
-        rf_model = RandomForestClassifier(
-            n_estimators=500,  # Reduced from 2000
-            max_depth=8,  # Limited depth
-            min_samples_split=3,  # Increased from 2
-            min_samples_leaf=2,  # Increased from 1
-            max_features='sqrt',
-            random_state=42,
-            n_jobs=-1,
-            class_weight='balanced'
-        )
-        
-        # Train all models
-        print("\n1. Training LightGBM Model 1 (Conservative)...")
-        lgb_model1.fit(X_train_scaled, y_train)
-        acc1 = lgb_model1.score(X_train_scaled, y_train)
-        print(f"   Training accuracy: {acc1:.4f}")
-        
-        print("\n2. Training LightGBM Model 2 (Moderate)...")
-        lgb_model2.fit(X_train_scaled, y_train)
-        acc2 = lgb_model2.score(X_train_scaled, y_train)
-        print(f"   Training accuracy: {acc2:.4f}")
-        
-        print("\n3. Training Random Forest (Conservative)...")
-        rf_model.fit(X_train_scaled, y_train)
-        acc3 = rf_model.score(X_train_scaled, y_train)
-        print(f"   Training accuracy: {acc3:.4f}")
-        
-        # Create ensemble with fewer models
-        print("\n" + "=" * 70)
-        print("Creating Conservative Ensemble...")
-        print("=" * 70)
-        
-        ensemble = VotingClassifier(
-            estimators=[
-                ('lgb1', lgb_model1),
-                ('lgb2', lgb_model2),
-                ('rf', rf_model)
-            ],
-            voting='soft',
-            weights=[2, 2, 1],  # Equal-ish weights
-            n_jobs=-1
-        )
-        
-        ensemble.fit(X_train_scaled, y_train)
-        ensemble_acc = ensemble.score(X_train_scaled, y_train)
-        
-        print(f"\nEnsemble Training Accuracy: {ensemble_acc:.4f}")
-        
-        if ensemble_acc > 0.95:
-            print("\n⚠️  WARNING: Training accuracy very high (>95%)")
-            print("    Model may still overfit. Consider further regularization.")
-        
-        self.model = ensemble
-        self.save_model()
-        
-        print("\n" + "=" * 70)
-        print("✓ TRAINING COMPLETE!")
-        print("=" * 70)
-        print(f"Model: Conservative Ensemble (3 models)")
-        print(f"Features: {X_train.shape[1]} (reduced from 300)")
-        print(f"Training Accuracy: {ensemble_acc:.4f}")
-        print(f"Individual accuracies: {acc1:.4f}, {acc2:.4f}, {acc3:.4f}")
-        print("=" * 70)
-        
-        return ensemble_acc
-    
-    def predict(self, test_dir='test'):
-        if self.model is None:
-            self.load_model()
-        
-        predictions = []
-        test_files = [f for f in os.listdir(test_dir) if f.endswith('.txt')]
-        test_files = sorted(test_files, key=lambda x: int(x.split('.')[0]))
-        
-        print(f"\nProcessing {len(test_files)} test files...")
-        
-        for idx, filename in enumerate(test_files):
-            filepath = os.path.join(test_dir, filename)
-            file_id = filename.split('.')[0]
-            
-            features = self.extract_features_from_file(filepath)
-            features_scaled = self.scaler.transform(features.reshape(1, -1))
-            
-            pred_rank = self.model.predict(features_scaled)[0]
-            predictions.append({'id': int(file_id), 'rank': pred_rank})
-            
-            if (idx + 1) % 50 == 0:
-                print(f"  Processed {idx + 1}/{len(test_files)} files")
-        
-        print(f"  Completed all {len(test_files)} files")
-        
-        return predictions
-    
-    def save_model(self, model_path='model_antioverfit.pkl', scaler_path='scaler_antioverfit.pkl'):
-        with open(model_path, 'wb') as f:
-            pickle.dump(self.model, f)
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(self.scaler, f)
-        print(f"\n✓ Model saved to {model_path} and {scaler_path}")
-    
-    def load_model(self, model_path='model_antioverfit.pkl', scaler_path='scaler_antioverfit.pkl'):
-        if not os.path.exists(model_path) or not os.path.exists(scaler_path):
-            raise FileNotFoundError(
-                "Model files not found. Run training first:\n"
-                "  python Q5.py --train --train_dir train"
-            )
-        
-        with open(model_path, 'rb') as f:
-            self.model = pickle.load(f)
-        with open(scaler_path, 'rb') as f:
-            self.scaler = pickle.load(f)
-        print("✓ Model loaded successfully")
+    # Don't forget the last game if splitting
+    if split_games and current_game_features:
+        games_features.append(current_game_features)
+        return games_features
+    else:
+        return features_list
 
+def aggregate_features(features_list):
+    """Aggregate features from multiple moves into a single sample."""
+    if not features_list:
+        return None
+    
+    features_array = np.array(features_list)
+    
+    # Compute statistics: mean, std, min, max, median
+    mean_features = np.mean(features_array, axis=0)
+    std_features = np.std(features_array, axis=0)
+    min_features = np.min(features_array, axis=0)
+    max_features = np.max(features_array, axis=0)
+    median_features = np.median(features_array, axis=0)
+    
+    # Concatenate all statistics
+    aggregated = np.concatenate([mean_features, std_features, min_features, max_features, median_features])
+    
+    return aggregated
+
+def load_training_data(train_dir='train', games_per_sample=5):
+    """Load and process training data.
+    
+    Args:
+        train_dir: Directory containing training files
+        games_per_sample: Number of games to aggregate into one training sample
+    """
+    X_train = []
+    y_train = []
+    
+    for rank in range(1, 10):  # 1D to 9D
+        filename = f'log_{rank}D_policy_train.txt'
+        filepath = os.path.join(train_dir, filename)
+        
+        if not os.path.exists(filepath):
+            print(f"Warning: {filepath} not found, skipping...")
+            continue
+        
+        print(f"Processing {filename}...")
+        # Parse games separately
+        games_features = parse_game_file(filepath, split_games=True)
+        print(f"  Found {len(games_features)} games")
+        
+        # Create multiple samples by grouping games
+        if len(games_features) >= games_per_sample:
+            # Group games into samples
+            num_samples = len(games_features) // games_per_sample
+            for sample_idx in range(num_samples):
+                start_idx = sample_idx * games_per_sample
+                end_idx = start_idx + games_per_sample
+                
+                # Combine features from multiple games
+                combined_features = []
+                for game_features in games_features[start_idx:end_idx]:
+                    combined_features.extend(game_features)
+                
+                # Aggregate features
+                if len(combined_features) > 0:
+                    aggregated = aggregate_features(combined_features)
+                    if aggregated is not None and len(aggregated) > 0:
+                        X_train.append(aggregated)
+                        y_train.append(rank - 1)  # Convert to 0-indexed (0-8)
+            
+            print(f"  -> Created {num_samples} training samples from {len(games_features)} games")
+        else:
+            # If too few games, use all games as one sample
+            all_features = []
+            for game_features in games_features:
+                all_features.extend(game_features)
+            
+            if len(all_features) > 0:
+                aggregated = aggregate_features(all_features)
+                if aggregated is not None and len(aggregated) > 0:
+                    X_train.append(aggregated)
+                    y_train.append(rank - 1)
+            print(f"  -> Created 1 training sample from {len(games_features)} games (too few to split)")
+    
+    if len(X_train) == 0:
+        print("\nERROR: No training data loaded!")
+        print(f"Please check that training files exist in '{train_dir}' directory")
+        print("Expected files: log_1D_policy_train.txt, log_2D_policy_train.txt, ..., log_9D_policy_train.txt")
+    else:
+        print(f"\nSuccessfully loaded {len(X_train)} training samples")
+        print(f"Class distribution: {np.bincount(y_train)}")
+    
+    return np.array(X_train), np.array(y_train)
+
+def load_test_data(test_dir='test'):
+    """Load and process test data."""
+    X_test = []
+    test_files = []
+    
+    for filename in sorted(os.listdir(test_dir), key=lambda x: int(x.split('.')[0]) if x.split('.')[0].isdigit() else 0):
+        if filename.endswith('.txt'):
+            filepath = os.path.join(test_dir, filename)
+            print(f"Processing {filename}...")
+            
+            # For test data, aggregate all moves in the file (don't split by game)
+            features_list = parse_game_file(filepath, split_games=False)
+            aggregated = aggregate_features(features_list)
+            
+            if aggregated is not None:
+                X_test.append(aggregated)
+                test_files.append(filename.replace('.txt', ''))
+    
+    return np.array(X_test), test_files
+
+def train_model(X_train, y_train, output_path='lgb_model.pkl'):
+    """Train LightGBM model."""
+    print("\nTraining LightGBM model...")
+    
+    # Split for validation
+    X_tr, X_val, y_tr, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42, stratify=y_train)
+    
+    # LightGBM parameters
+    params = {
+        'objective': 'multiclass',
+        'num_class': 9,
+        'metric': 'multi_logloss',
+        'boosting_type': 'gbdt',
+        'num_leaves': 31,
+        'learning_rate': 0.05,
+        'feature_fraction': 0.8,
+        'bagging_fraction': 0.8,
+        'bagging_freq': 5,
+        'verbose': -1,
+        'random_state': 42
+    }
+    
+    # Create datasets
+    train_data = lgb.Dataset(X_tr, label=y_tr)
+    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+    
+    # Train
+    model = lgb.train(
+        params,
+        train_data,
+        num_boost_round=1000,
+        valid_sets=[train_data, val_data],
+        valid_names=['train', 'valid'],
+        callbacks=[lgb.early_stopping(stopping_rounds=50), lgb.log_evaluation(50)]
+    )
+    
+    # Evaluate
+    y_pred = model.predict(X_val, num_iteration=model.best_iteration)
+    y_pred_class = np.argmax(y_pred, axis=1)
+    accuracy = accuracy_score(y_val, y_pred_class)
+    print(f"\nValidation Accuracy: {accuracy:.4f}")
+    
+    # Save model
+    with open(output_path, 'wb') as f:
+        pickle.dump(model, f)
+    print(f"Model saved to {output_path}")
+    
+    return model
+
+def predict_and_save(model, X_test, test_files, output_path='submission.csv'):
+    """Generate predictions and save to CSV."""
+    print("\nGenerating predictions...")
+    
+    predictions = model.predict(X_test, num_iteration=model.best_iteration)
+    predicted_ranks = np.argmax(predictions, axis=1) + 1  # Convert back to 1-9
+    
+    # Create submission dataframe
+    submission = pd.DataFrame({
+        'id': test_files,
+        'rank': predicted_ranks
+    })
+    
+    submission.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    print(f"\nSample predictions:")
+    print(submission.head(10))
 
 def main():
-    parser = argparse.ArgumentParser(description='Go Rank Prediction with LightGBM')
+    parser = argparse.ArgumentParser(description='Go Rank Prediction')
     parser.add_argument('--train', action='store_true', help='Train the model')
     parser.add_argument('--train_dir', type=str, default='train', help='Training data directory')
     parser.add_argument('--test_dir', type=str, default='test', help='Test data directory')
+    parser.add_argument('--model_path', type=str, default='lgb_model.pkl', help='Model file path')
+    parser.add_argument('--output', type=str, default='submission.csv', help='Output CSV file')
+    parser.add_argument('--debug', action='store_true', help='Debug mode: show file format')
+    
     args = parser.parse_args()
     
-    predictor = LightGBMGoRankPredictor()
+    # Debug mode
+    if args.debug:
+        print("DEBUG MODE: Inspecting file format...")
+        test_file = os.path.join(args.train_dir, 'log_1D_policy_train.txt')
+        if os.path.exists(test_file):
+            debug_file_format(test_file, 50)
+        else:
+            print(f"File not found: {test_file}")
+            print(f"Available files in {args.train_dir}:")
+            if os.path.exists(args.train_dir):
+                for f in os.listdir(args.train_dir):
+                    print(f"  - {f}")
+        return
     
     if args.train:
-        predictor.train(args.train_dir)
+        # Training mode
+        print("=" * 50)
+        print("TRAINING MODE")
+        print("=" * 50)
+        X_train, y_train = load_training_data(args.train_dir)
+        print(f"\nTraining data shape: {X_train.shape}")
+        
+        if len(X_train) == 0:
+            print("\nERROR: No training data found. Exiting.")
+            print("Try running with --debug flag to inspect file format:")
+            print("  python Q5.py --debug")
+            return
+        
+        model = train_model(X_train, y_train, args.model_path)
     else:
-        print("=" * 70)
-        print("PREDICTION MODE - LightGBM")
-        print("=" * 70)
-        predictions = predictor.predict(args.test_dir)
+        # Evaluation mode (default)
+        print("=" * 50)
+        print("EVALUATION MODE")
+        print("=" * 50)
         
-        df = pd.DataFrame(predictions)
-        df = df.sort_values('id')
-        df.to_csv('submission.csv', index=False)
+        # Load model
+        if not os.path.exists(args.model_path):
+            print(f"Error: Model file {args.model_path} not found!")
+            print("Please train the model first using: python Q5.py --train")
+            return
         
-        print("\n" + "=" * 70)
-        print("✓ PREDICTIONS SAVED")
-        print("=" * 70)
-        print(f"File: submission.csv")
-        print(f"Total predictions: {len(predictions)}")
-        print("\nFirst 10 predictions:")
-        print(df.head(10))
-        print("\nRank distribution:")
-        print(df['rank'].value_counts().sort_index())
-        print("\n" + "=" * 70)
-        print("✓ Ready for Kaggle submission!")
-        print("=" * 70)
+        with open(args.model_path, 'rb') as f:
+            model = pickle.load(f)
+        print(f"Model loaded from {args.model_path}")
+        
+        # Load test data and predict
+        X_test, test_files = load_test_data(args.test_dir)
+        print(f"\nTest data shape: {X_test.shape}")
+        predict_and_save(model, X_test, test_files, args.output)
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
