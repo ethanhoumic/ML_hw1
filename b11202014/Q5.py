@@ -3,7 +3,7 @@ import re
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score
 from scipy import stats
 import pickle
@@ -135,17 +135,37 @@ def aggregate_features(features_list):
     median_features = np.median(features_array, axis=0)
     
     # Additional statistics for better discrimination
+    q10_features = np.percentile(features_array, 10, axis=0)
     q25_features = np.percentile(features_array, 25, axis=0)
     q75_features = np.percentile(features_array, 75, axis=0)
+    q90_features = np.percentile(features_array, 90, axis=0)
+    
+    # Range features
+    range_features = max_features - min_features
+    iqr_features = q75_features - q25_features
     
     # Skewness and kurtosis (distribution shape)
-    from scipy import stats
     skew_features = stats.skew(features_array, axis=0)
     kurt_features = stats.kurtosis(features_array, axis=0)
     
     # Replace any NaN values with 0
     skew_features = np.nan_to_num(skew_features, nan=0.0)
     kurt_features = np.nan_to_num(kurt_features, nan=0.0)
+    
+    # Cross-features: relationships between the 9 rank model outputs
+    # Extract rank model outputs (indices 18-26)
+    rank_outputs = features_array[:, 18:27]
+    rank_mean = np.mean(rank_outputs, axis=0)
+    rank_std = np.std(rank_outputs, axis=0)
+    
+    # Entropy of rank outputs (measure of uncertainty)
+    rank_entropy = []
+    for i in range(rank_outputs.shape[0]):
+        probs = rank_outputs[i, :] + 1e-10  # Avoid log(0)
+        probs = probs / probs.sum()
+        entropy = -np.sum(probs * np.log(probs))
+        rank_entropy.append(entropy)
+    rank_entropy_stats = [np.mean(rank_entropy), np.std(rank_entropy), np.max(rank_entropy), np.min(rank_entropy)]
     
     # Concatenate all statistics
     aggregated = np.concatenate([
@@ -154,10 +174,17 @@ def aggregate_features(features_list):
         min_features, 
         max_features, 
         median_features,
+        q10_features,
         q25_features,
         q75_features,
+        q90_features,
+        range_features,
+        iqr_features,
         skew_features,
-        kurt_features
+        kurt_features,
+        rank_mean,
+        rank_std,
+        rank_entropy_stats
     ])
     
     return aggregated
@@ -249,41 +276,19 @@ def load_test_data(test_dir='test'):
     
     return np.array(X_test), test_files
 
-def train_model(X_train, y_train, output_path='lgb_model.pkl'):
-    """Train LightGBM model."""
-    print("\nTraining LightGBM model...")
+def train_single_model(X_train, y_train, params, num_boost_round=2000):
+    """Train a single LightGBM model."""
+    X_tr, X_val, y_tr, y_val = train_test_split(
+        X_train, y_train, test_size=0.15, random_state=params.get('seed', 42), stratify=y_train
+    )
     
-    # Split for validation
-    X_tr, X_val, y_tr, y_val = train_test_split(X_train, y_train, test_size=0.15, random_state=42, stratify=y_train)
-    
-    # LightGBM parameters - improved from baseline
-    params = {
-        'objective': 'multiclass',
-        'num_class': 9,
-        'metric': 'multi_logloss',
-        'boosting_type': 'gbdt',
-        'num_leaves': 63,
-        'max_depth': 8,
-        'learning_rate': 0.03,
-        'feature_fraction': 0.9,
-        'bagging_fraction': 0.9,
-        'bagging_freq': 5,
-        'min_data_in_leaf': 20,
-        'lambda_l1': 0.5,
-        'lambda_l2': 0.5,
-        'verbose': -1,
-        'random_state': 42
-    }
-    
-    # Create datasets
     train_data = lgb.Dataset(X_tr, label=y_tr)
     val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
     
-    # Train
     model = lgb.train(
         params,
         train_data,
-        num_boost_round=2000,
+        num_boost_round=num_boost_round,
         valid_sets=[train_data, val_data],
         valid_names=['train', 'valid'],
         callbacks=[lgb.early_stopping(stopping_rounds=100), lgb.log_evaluation(50)]
@@ -293,21 +298,80 @@ def train_model(X_train, y_train, output_path='lgb_model.pkl'):
     y_pred = model.predict(X_val, num_iteration=model.best_iteration)
     y_pred_class = np.argmax(y_pred, axis=1)
     accuracy = accuracy_score(y_val, y_pred_class)
-    print(f"\nValidation Accuracy: {accuracy:.4f}")
     
-    # Save model
-    with open(output_path, 'wb') as f:
-        pickle.dump(model, f)
-    print(f"Model saved to {output_path}")
-    
-    return model
+    return model, accuracy
 
-def predict_and_save(model, X_test, test_files, output_path='submission.csv'):
-    """Generate predictions and save to CSV."""
-    print("\nGenerating predictions...")
+def train_model_ensemble(X_train, y_train, output_path='lgb_model.pkl', n_models=5):
+    """Train an ensemble of LightGBM models with different configurations."""
+    print(f"\nTraining ensemble of {n_models} LightGBM models...")
     
-    predictions = model.predict(X_test, num_iteration=model.best_iteration)
-    predicted_ranks = np.argmax(predictions, axis=1) + 1  # Convert back to 1-9
+    models = []
+    accuracies = []
+    
+    # Different configurations for diversity
+    configs = [
+        {'num_leaves': 63, 'max_depth': 8, 'learning_rate': 0.03, 'lambda_l1': 0.5, 'lambda_l2': 0.5},
+        {'num_leaves': 95, 'max_depth': 9, 'learning_rate': 0.025, 'lambda_l1': 0.3, 'lambda_l2': 0.3},
+        {'num_leaves': 47, 'max_depth': 7, 'learning_rate': 0.04, 'lambda_l1': 0.7, 'lambda_l2': 0.7},
+        {'num_leaves': 80, 'max_depth': 10, 'learning_rate': 0.02, 'lambda_l1': 0.4, 'lambda_l2': 0.4},
+        {'num_leaves': 55, 'max_depth': 8, 'learning_rate': 0.035, 'lambda_l1': 0.6, 'lambda_l2': 0.6},
+    ]
+    
+    for i in range(n_models):
+        print(f"\n{'='*60}")
+        print(f"Training Model {i+1}/{n_models}")
+        print('='*60)
+        
+        config = configs[i % len(configs)]
+        params = {
+            'objective': 'multiclass',
+            'num_class': 9,
+            'metric': 'multi_logloss',
+            'boosting_type': 'gbdt',
+            'feature_fraction': 0.9,
+            'bagging_fraction': 0.9,
+            'bagging_freq': 5,
+            'min_data_in_leaf': 20,
+            'verbose': -1,
+            'seed': 42 + i,
+            **config
+        }
+        
+        model, acc = train_single_model(X_train, y_train, params)
+        models.append(model)
+        accuracies.append(acc)
+        print(f"Model {i+1} Validation Accuracy: {acc:.4f}")
+    
+    avg_accuracy = np.mean(accuracies)
+    print(f"\n{'='*60}")
+    print(f"Ensemble Average Validation Accuracy: {avg_accuracy:.4f}")
+    print('='*60)
+    
+    # Save ensemble
+    with open(output_path, 'wb') as f:
+        pickle.dump(models, f)
+    print(f"Ensemble saved to {output_path}")
+    
+    return models
+
+def predict_and_save(models, X_test, test_files, output_path='submission.csv'):
+    """Generate predictions using ensemble and save to CSV."""
+    print("\nGenerating ensemble predictions...")
+    
+    # Handle both single model and ensemble
+    if not isinstance(models, list):
+        models = [models]
+    
+    # Collect predictions from all models
+    all_predictions = []
+    for i, model in enumerate(models):
+        pred = model.predict(X_test, num_iteration=model.best_iteration)
+        all_predictions.append(pred)
+        print(f"Model {i+1} predictions collected")
+    
+    # Average predictions
+    avg_predictions = np.mean(all_predictions, axis=0)
+    predicted_ranks = np.argmax(avg_predictions, axis=1) + 1  # Convert back to 1-9
     
     # Create submission dataframe
     submission = pd.DataFrame({
@@ -328,6 +392,7 @@ def main():
     parser.add_argument('--model_path', type=str, default='lgb_model.pkl', help='Model file path')
     parser.add_argument('--output', type=str, default='submission.csv', help='Output CSV file')
     parser.add_argument('--debug', action='store_true', help='Debug mode: show file format')
+    parser.add_argument('--n_models', type=int, default=5, help='Number of models in ensemble')
     
     args = parser.parse_args()
     
@@ -359,7 +424,7 @@ def main():
             print("  python Q5.py --debug")
             return
         
-        model = train_model(X_train, y_train, args.model_path)
+        models = train_model_ensemble(X_train, y_train, args.model_path, args.n_models)
     else:
         # Evaluation mode (default)
         print("=" * 50)
@@ -373,13 +438,13 @@ def main():
             return
         
         with open(args.model_path, 'rb') as f:
-            model = pickle.load(f)
-        print(f"Model loaded from {args.model_path}")
+            models = pickle.load(f)
+        print(f"Model(s) loaded from {args.model_path}")
         
         # Load test data and predict
         X_test, test_files = load_test_data(args.test_dir)
         print(f"\nTest data shape: {X_test.shape}")
-        predict_and_save(model, X_test, test_files, args.output)
+        predict_and_save(models, X_test, test_files, args.output)
 
 if __name__ == "__main__":
     main()
