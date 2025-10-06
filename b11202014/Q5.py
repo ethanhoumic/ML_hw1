@@ -3,6 +3,8 @@ import re
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+import xgboost as xgb
+import catboost as cb
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score
 from scipy import stats
@@ -185,6 +187,17 @@ def aggregate_features(features_list):
         weighted_rank_preds.append(weighted_rank)
     weighted_rank_mean = np.mean(weighted_rank_preds)
     weighted_rank_std = np.std(weighted_rank_preds)
+    weighted_rank_median = np.median(weighted_rank_preds)
+    
+    # 3. Top-2 rank predictions (sometimes it's between two ranks)
+    top2_ranks = np.argsort(rank_outputs, axis=1)[:, -2:]
+    top2_diff = []
+    for i in range(rank_outputs.shape[0]):
+        top2_probs = rank_outputs[i, top2_ranks[i]]
+        diff = top2_probs[1] - top2_probs[0]  # Difference between top 2
+        top2_diff.append(diff)
+    top2_diff_mean = np.mean(top2_diff)
+    top2_diff_std = np.std(top2_diff)
     
     # Concatenate all statistics
     aggregated = np.concatenate([
@@ -204,7 +217,8 @@ def aggregate_features(features_list):
         [rank_prediction_mean, rank_prediction_std],
         [rank_confidence_mean, rank_confidence_std],
         [rank_entropy_mean, rank_entropy_std],
-        [weighted_rank_mean, weighted_rank_std]
+        [weighted_rank_mean, weighted_rank_std, weighted_rank_median],
+        [top2_diff_mean, top2_diff_std]
     ])
     
     return aggregated
@@ -296,7 +310,7 @@ def load_test_data(test_dir='test'):
     
     return np.array(X_test), test_files
 
-def train_single_model(X_train, y_train, params, num_boost_round=2000):
+def train_single_lightgbm_model(X_train, y_train, params, num_boost_round=2000):
     """Train a single LightGBM model."""
     X_tr, X_val, y_tr, y_val = train_test_split(
         X_train, y_train, test_size=0.15, random_state=params.get('seed', 42), stratify=y_train
@@ -321,42 +335,34 @@ def train_single_model(X_train, y_train, params, num_boost_round=2000):
     
     return model, accuracy
 
-def train_model_ensemble(X_train, y_train, output_path='lgb_model.pkl', n_models=5):
-    """Train an ensemble of LightGBM models with different configurations."""
-    print(f"\nTraining ensemble of {n_models} LightGBM models...")
+def train_model_ensemble(X_train, y_train, output_path='lgb_model.pkl', n_lgb=3, n_xgb=2, n_cat=2):
+    """Train a multi-algorithm ensemble: LightGBM + XGBoost + CatBoost."""
+    print(f"\nTraining multi-algorithm ensemble:")
+    print(f"  - {n_lgb} LightGBM models")
+    print(f"  - {n_xgb} XGBoost models")
+    print(f"  - {n_cat} CatBoost models")
+    print(f"  Total: {n_lgb + n_xgb + n_cat} models\n")
     
-    models = []
-    accuracies = []
+    all_models = []
+    all_accuracies = []
+    model_types = []
     
-    # Back to configurations that worked well (88%)
-    configs = [
-        # Model 1: Balanced, proven good
+    # === Train LightGBM models ===
+    lgb_configs = [
         {'num_leaves': 63, 'max_depth': 8, 'learning_rate': 0.03, 'lambda_l1': 0.5, 'lambda_l2': 0.5,
          'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
-        
-        # Model 2: Slightly more complex
-        {'num_leaves': 95, 'max_depth': 9, 'learning_rate': 0.025, 'lambda_l1': 0.3, 'lambda_l2': 0.3,
-         'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
-        
-        # Model 3: More conservative
-        {'num_leaves': 47, 'max_depth': 7, 'learning_rate': 0.04, 'lambda_l1': 0.7, 'lambda_l2': 0.7,
-         'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
-        
-        # Model 4: Deep but regularized
         {'num_leaves': 80, 'max_depth': 10, 'learning_rate': 0.02, 'lambda_l1': 0.4, 'lambda_l2': 0.4,
          'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
-        
-        # Model 5: Alternative balanced
         {'num_leaves': 55, 'max_depth': 8, 'learning_rate': 0.035, 'lambda_l1': 0.6, 'lambda_l2': 0.6,
          'feature_fraction': 0.9, 'bagging_fraction': 0.9, 'min_data_in_leaf': 20},
     ]
     
-    for i in range(n_models):
+    for i in range(n_lgb):
         print(f"\n{'='*60}")
-        print(f"Training Model {i+1}/{n_models}")
+        print(f"Training LightGBM Model {i+1}/{n_lgb}")
         print('='*60)
         
-        config = configs[i % len(configs)]
+        config = lgb_configs[i % len(lgb_configs)]
         params = {
             'objective': 'multiclass',
             'num_class': 9,
@@ -368,38 +374,138 @@ def train_model_ensemble(X_train, y_train, output_path='lgb_model.pkl', n_models
             **config
         }
         
-        model, acc = train_single_model(X_train, y_train, params, num_boost_round=2000)
-        models.append(model)
-        accuracies.append(acc)
-        print(f"Model {i+1} Validation Accuracy: {acc:.4f}")
+        model, acc = train_single_lightgbm_model(X_train, y_train, params)
+        all_models.append(model)
+        all_accuracies.append(acc)
+        model_types.append('lgb')
+        print(f"LightGBM Model {i+1} Validation Accuracy: {acc:.4f}")
     
-    avg_accuracy = np.mean(accuracies)
+    # === Train XGBoost models ===
+    for i in range(n_xgb):
+        print(f"\n{'='*60}")
+        print(f"Training XGBoost Model {i+1}/{n_xgb}")
+        print('='*60)
+        
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X_train, y_train, test_size=0.15, random_state=42 + n_lgb + i, stratify=y_train
+        )
+        
+        model = xgb.XGBClassifier(
+            n_estimators=2000,
+            max_depth=8,
+            learning_rate=0.03,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            reg_alpha=0.5,
+            reg_lambda=0.5,
+            random_state=42 + n_lgb + i,
+            objective='multi:softprob',
+            num_class=9,
+            eval_metric='mlogloss',
+            early_stopping_rounds=100,
+            verbosity=0
+        )
+        
+        model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_val, y_val)],
+            verbose=50
+        )
+        
+        y_pred = model.predict(X_val)
+        acc = accuracy_score(y_val, y_pred)
+        
+        all_models.append(model)
+        all_accuracies.append(acc)
+        model_types.append('xgb')
+        print(f"XGBoost Model {i+1} Validation Accuracy: {acc:.4f}")
+    
+    # === Train CatBoost models ===
+    for i in range(n_cat):
+        print(f"\n{'='*60}")
+        print(f"Training CatBoost Model {i+1}/{n_cat}")
+        print('='*60)
+        
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X_train, y_train, test_size=0.15, random_state=42 + n_lgb + n_xgb + i, stratify=y_train
+        )
+        
+        model = cb.CatBoostClassifier(
+            iterations=2000,
+            depth=8,
+            learning_rate=0.03,
+            l2_leaf_reg=3,
+            random_seed=42 + n_lgb + n_xgb + i,
+            loss_function='MultiClass',
+            verbose=False,
+            early_stopping_rounds=100
+        )
+        
+        model.fit(
+            X_tr, y_tr,
+            eval_set=(X_val, y_val),
+            verbose=50
+        )
+        
+        y_pred = model.predict(X_val).flatten()
+        acc = accuracy_score(y_val, y_pred)
+        
+        all_models.append(model)
+        all_accuracies.append(acc)
+        model_types.append('cat')
+        print(f"CatBoost Model {i+1} Validation Accuracy: {acc:.4f}")
+    
+    # Summary
+    avg_accuracy = np.mean(all_accuracies)
     print(f"\n{'='*60}")
-    print(f"Ensemble Average Validation Accuracy: {avg_accuracy:.4f}")
-    print(f"Best Single Model Accuracy: {max(accuracies):.4f}")
+    print(f"ENSEMBLE SUMMARY")
+    print('='*60)
+    print(f"LightGBM models: {n_lgb}, avg acc: {np.mean([all_accuracies[i] for i in range(len(all_accuracies)) if model_types[i] == 'lgb']):.4f}")
+    print(f"XGBoost models: {n_xgb}, avg acc: {np.mean([all_accuracies[i] for i in range(len(all_accuracies)) if model_types[i] == 'xgb']):.4f}")
+    print(f"CatBoost models: {n_cat}, avg acc: {np.mean([all_accuracies[i] for i in range(len(all_accuracies)) if model_types[i] == 'cat']):.4f}")
+    print(f"Overall Average Validation Accuracy: {avg_accuracy:.4f}")
+    print(f"Best Single Model Accuracy: {max(all_accuracies):.4f}")
     print('='*60)
     
-    # Save ensemble
-    with open(output_path, 'wb') as f:
-        pickle.dump(models, f)
-    print(f"Ensemble saved to {output_path}")
+    # Save ensemble with metadata
+    ensemble_data = {
+        'models': all_models,
+        'model_types': model_types,
+        'accuracies': all_accuracies
+    }
     
-    return models
+    with open(output_path, 'wb') as f:
+        pickle.dump(ensemble_data, f)
+    print(f"Multi-algorithm ensemble saved to {output_path}")
+    
+    return all_models, model_types
 
-def predict_and_save(models, X_test, test_files, output_path='submission.csv'):
-    """Generate predictions using ensemble and save to CSV."""
+def predict_and_save(models_or_dict, X_test, test_files, output_path='submission.csv'):
+    """Generate predictions using multi-algorithm ensemble and save to CSV."""
     print("\nGenerating ensemble predictions...")
     
-    # Handle both single model and ensemble
-    if not isinstance(models, list):
-        models = [models]
+    # Handle both old format (list) and new format (dict with metadata)
+    if isinstance(models_or_dict, dict):
+        models = models_or_dict['models']
+        model_types = models_or_dict['model_types']
+    else:
+        models = models_or_dict if isinstance(models_or_dict, list) else [models_or_dict]
+        model_types = ['lgb'] * len(models)
     
     # Collect predictions from all models
     all_predictions = []
-    for i, model in enumerate(models):
-        pred = model.predict(X_test, num_iteration=model.best_iteration)
+    for i, (model, mtype) in enumerate(zip(models, model_types)):
+        if mtype == 'lgb':
+            pred = model.predict(X_test, num_iteration=model.best_iteration)
+        elif mtype == 'xgb':
+            pred = model.predict_proba(X_test)
+        elif mtype == 'cat':
+            pred = model.predict_proba(X_test)
+        else:
+            raise ValueError(f"Unknown model type: {mtype}")
+        
         all_predictions.append(pred)
-        print(f"Model {i+1} predictions collected")
+        print(f"Model {i+1} ({mtype.upper()}) predictions collected")
     
     # Average predictions
     avg_predictions = np.mean(all_predictions, axis=0)
@@ -424,7 +530,10 @@ def main():
     parser.add_argument('--model_path', type=str, default='lgb_model.pkl', help='Model file path')
     parser.add_argument('--output', type=str, default='submission.csv', help='Output CSV file')
     parser.add_argument('--debug', action='store_true', help='Debug mode: show file format')
-    parser.add_argument('--n_models', type=int, default=5, help='Number of models in ensemble')
+    parser.add_argument('--n_models', type=int, default=7, help='Number of models in ensemble (deprecated, now uses preset config)')
+    parser.add_argument('--n_lgb', type=int, default=3, help='Number of LightGBM models')
+    parser.add_argument('--n_xgb', type=int, default=2, help='Number of XGBoost models')
+    parser.add_argument('--n_cat', type=int, default=2, help='Number of CatBoost models')
     
     args = parser.parse_args()
     
@@ -456,7 +565,7 @@ def main():
             print("  python Q5.py --debug")
             return
         
-        models = train_model_ensemble(X_train, y_train, args.model_path, args.n_models)
+        models = train_model_ensemble(X_train, y_train, args.model_path)
     else:
         # Evaluation mode (default)
         print("=" * 50)
@@ -470,13 +579,21 @@ def main():
             return
         
         with open(args.model_path, 'rb') as f:
-            models = pickle.load(f)
-        print(f"Model(s) loaded from {args.model_path}")
+            models_data = pickle.load(f)
+        
+        # Handle both old and new format
+        if isinstance(models_data, dict):
+            print(f"Loaded multi-algorithm ensemble:")
+            print(f"  - {sum(1 for t in models_data['model_types'] if t == 'lgb')} LightGBM models")
+            print(f"  - {sum(1 for t in models_data['model_types'] if t == 'xgb')} XGBoost models")
+            print(f"  - {sum(1 for t in models_data['model_types'] if t == 'cat')} CatBoost models")
+        else:
+            print(f"Loaded {len(models_data)} LightGBM models")
         
         # Load test data and predict
         X_test, test_files = load_test_data(args.test_dir)
         print(f"\nTest data shape: {X_test.shape}")
-        predict_and_save(models, X_test, test_files, args.output)
+        predict_and_save(models_data, X_test, test_files, args.output)
 
 if __name__ == "__main__":
     main()
